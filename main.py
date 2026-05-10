@@ -55,7 +55,7 @@ def initialize_game(llm: LLMClient) -> Player:
         ))
 
         # Negotiation loop
-        max_attempts = 3
+        max_attempts = 5
         attempts = 0
 
         while conflicts and attempts < max_attempts:
