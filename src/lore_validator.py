@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich import box
+import re
 
 # Import LLM client for semantic validation
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -247,9 +248,10 @@ class LoreValidator:
     """Validates user input against lore using LLM-based semantic analysis."""
 
     def __init__(self, lore_parser: LoreParser,
-                 model_name: str = "qwen3.5:64k"):
+                 model_name: str = "qwen3.5:64k",
+                 console: Console = None):
         self.parser = lore_parser
-        self.console = console
+        self.console = console or Console()
         self.model_name = model_name
         self.llm_client = LLMClient(model_name=model_name)
 
@@ -297,12 +299,67 @@ class LoreValidator:
                     converted_conflicts.append(c)
             conflicts = converted_conflicts
 
+        is_valid = result["is_valid"]
+        suggestions = result.get("suggestions", [])
+
+        # If there are conflicts, generate concrete revised backstory options via LLM
+        if not is_valid and self.llm_client:
+            suggestions = self._generate_revision_options(context.get("user_input", ""), conflicts)
+
         return LLMValidationError(
-            is_valid=result["is_valid"],
+            is_valid=is_valid,
             conflicts=conflicts,
-            suggestions=result.get("suggestions", []),
+            suggestions=suggestions,
             llm_response=llm_response
         )
+
+    def _generate_revision_options(self, user_input: str, conflicts: List[LoreConflict]) -> List[str]:
+        """Generate exactly 3 concrete revised backstory options that resolve the given lore conflicts."""
+        # Try LLM first
+        conflict_details = "\n".join(f"- {c.conflict_message}" for c in conflicts)
+        revision_prompt = (
+            f"Revise this user's backstory so it fits the world lore.\n\n"
+            f"LORE CONTEXT:\n{self.parser.db.lore_summary[:4000]}\n\n"
+            f"USER INPUT: {user_input!r}\n\n"
+            f"CONFLICTS TO FIX:\n{conflict_details}\n\n"
+            "Return EXACTLY a JSON array of 3 revised backstory strings.\n"
+            'Format: ["revision 1", "revision 2", "revision 3"]\n'
+            "No markdown, no code blocks, no explanation."
+        )
+
+        try:
+            response = self.llm_client.generate_flavor_text(
+                context=revision_prompt,
+                instruction="Return EXACTLY a JSON array of exactly 3 revised backstory strings. No markdown, no code blocks, no explanation."
+            )
+            start = response.find('[')
+            end = response.rfind(']') + 1
+            if start != -1 and end > start:
+                import json
+                revisions = json.loads(response[start:end])
+                valid = [rev for rev in revisions[:3] if isinstance(rev, str)]
+                if len(valid) == 3:
+                    return valid
+        except Exception as e:
+            self.console.print(f"[dim]Revision generation debug: {e}[/dim]")
+
+        # Fallback: always generate exactly 3 concrete revised backstories from lore data
+        factions = [f for f in ["Iron Circle", "Root-Walkers", "Oakhaven Guard", "Void Monks"] if f.lower() in self.parser.db.lore_summary.lower()]
+        if not factions:
+            factions = ["Iron Circle", "Root-Walkers"]
+
+        options = []
+        for i in range(3):
+            faction = factions[i % len(factions)]
+            conflict = conflicts[i % len(conflicts)]
+
+            # Combine the user's original story with a lore-appropriate faction replacement
+            prefix = user_input.split('.')[0] if '.' in user_input else user_input
+            options.append(
+                f"{prefix}. Instead of {conflict.fact.category}, you belong to the {faction}."
+            )
+
+        return options
 
     def _create_validation_prompt(self, context: dict) -> str:
         """Create the LLM prompt for validation."""
@@ -386,12 +443,42 @@ Return is_valid=false if ANY conflict is found. Be thorough in checking against 
         except json.JSONDecodeError as e:
             self.console.print(f"[yellow]Failed to parse LLM JSON: {e}[/yellow]")
             self.console.print(f"[yellow]Content: {json_content[:200]}[/yellow]")
+            # Attempt to repair common LLM JSON issues and retry
+            repaired = self._repair_json(json_content)
+            if repaired is not None:
+                try:
+                    return json.loads(repaired)
+                except json.JSONDecodeError:
+                    pass
             # Return defaults if parsing fails
             return {
                 "is_valid": True,
                 "conflicts": [],
                 "suggestions": []
             }
+
+    def _repair_json(self, text: str) -> Optional[str]:
+        """Attempt to fix common LLM JSON issues before giving up.
+
+        Known failure modes:
+        - Array elements missing {}  ( [type: "x"] instead of [{"type": "x"}] )
+        - Unquoted string values    ( severity: error  instead of  severity: "error" )
+        - Single quotes used        ( 'key' instead of "key" )
+        """
+        repaired = text
+
+        # Step 1: Replace single-quoted keys with double quotes
+        repaired = re.sub(r"(?<=\s)'([^']+)'\s*:", r'"\1":', repaired)
+
+        # Step 2: Unquote bare values (severity: error → severity: "error")
+        # Only when value is not true/false/null and not already quoted.
+        repaired = re.sub(
+            r':\s+([a-zA-Z_]\w*)\s*([,}\]])',
+            r': "\1"\2',
+            repaired,
+        )
+
+        return repaired
 
     def _create_conflict_from_llm(self, llm_type: str, message: str, severity: str = "error") -> LoreConflict:
         """Create a LoreConflict from LLM response."""
@@ -534,9 +621,119 @@ Return is_valid=false if ANY conflict is found. Be thorough in checking against 
 
     def _apply_revision(self, original_input: str, error: LLMValidationError) -> str:
         """Apply suggested revisions to the user's input."""
-        # For now, return the original input with a note
-        # In future, could use LLM to generate revised input
-        return original_input
+        if not error.suggestions:
+            return original_input
+
+        # If suggestions are structured revision options (e.g., "Revised: ..."), use them directly
+        for s in error.suggestions:
+            if s.startswith("Revised:"):
+                return s[len("Revised:"):].strip()
+        # Fallback: generate a revised version via LLM
+        return self._generate_revision(original_input, error)
+
+    def _generate_revision(self, original_input: str, error: LLMValidationError) -> str:
+        """Generate a concrete revised backstory that resolves lore conflicts."""
+        conflict_details = "\n".join(f"- {c.conflict_message}" for c in error.conflicts)
+        revision_prompt = f"""Take the following user input and revise it so it is consistent with the lore.
+
+LORE CONTEXT:
+{self.parser.db.lore_summary[:8000]}
+
+USER INPUT (has lore conflicts):
+"{original_input}"
+
+THESE ARE THE CONFLICTS:
+{conflict_details}
+
+PROVIDE ONLY A JSON ARRAY OF EXACTLY 3 REVISED BACKSTORIES IN THIS FORMAT:
+["Revised version 1 that resolves all conflicts", "Revised version 2...", "Revised version 3..."]
+
+Each revised backstory should preserve as much of the user's original intent and details as possible, while resolving the lore conflicts. Keep each one concise (1-3 sentences)."""
+
+        try:
+            response = self.llm_client.generate_flavor_text(
+                context=revision_prompt,
+                instruction="Respond with ONLY a JSON array of 3 revised backstory strings."
+            )
+            # Extract JSON array from response
+            start = response.find('[')
+            end = response.rfind(']') + 1
+            if start != -1 and end > start:
+                import json
+                revisions = json.loads(response[start:end])
+                return revisions[0]  # Return first suggestion
+        except Exception:
+            pass
+
+        # Last resort fallback
+        return f"Revised version of your input, adjusted to be consistent with the lore."
+
+    def suggest_revisions(self) -> List[str]:
+        """Generate multiple concrete revised backstory options for the user to choose from."""
+        return [s.replace("Revised:", "").strip() if s.startswith("Revised:") else s for s in self._current_suggestions]
+
+    def set_suggestions(self, suggestions: List[str]):
+        """Store suggestions so suggest_revisions can access them."""
+        self._current_suggestions = suggestions
+
+    def get_concrete_revision_options(self) -> Optional[Table]:
+        """Build a table of concrete revised backstory options using the LLM."""
+        conflict_details = "\n".join(f"- {c.conflict_message}" for c in self.errors.conflicts[:3])
+        revision_prompt = f"""Take the following user input and revise it so it is consistent with the lore.
+
+LORE CONTEXT:
+{self.parser.db.lore_summary[:4000]}
+
+USER INPUT (has lore conflicts):
+"{self.errors.input}"
+
+THESE ARE THE CONFLICTS TO FIX:
+{conflict_details}
+
+PROVIDE ONLY A JSON ARRAY OF EXACTLY 3 REVISED BACKSTORIES IN THIS FORMAT:
+["Revised version 1 that resolves all conflicts, preserving user's original intent", "Revised version 2...", "Revised version 3..."]
+
+Each revised backstory should preserve as much of the user's original details as possible. Keep each one concise (1-3 sentences)."""
+
+        try:
+            response = self.llm_client.generate_flavor_text(
+                context=revision_prompt,
+                instruction="Respond with ONLY a JSON array of 3 revised backstory strings."
+            )
+            start = response.find('[')
+            end = response.rfind(']') + 1
+            if start != -1 and end > start:
+                import json
+                revisions = json.loads(response[start:end])
+            else:
+                # Fallback from parsed suggestion text
+                suggestions = getattr(self, '_current_suggestions', None) or self.errors.suggestions
+                if len(suggestions) >= 3:
+                    revisions = [f"Suggestion {i+1}: {s}" for i, s in enumerate(suggestions)]
+                else:
+                    revisions = [f"Try a revision that addresses: {self.errors.conflicts[0].conflict_message}"]
+        except Exception:
+            suggestions = getattr(self, '_current_suggestions', None) or self.errors.suggestions
+            if len(suggestions) >= 3:
+                revisions = [f"Suggestion {i+1}: {s}" for i, s in enumerate(suggestions)]
+            else:
+                revisions = [f"Try a revision that addresses: {self.errors.conflicts[0].conflict_message}"]
+
+        # Build table from revisions
+        table = Table(
+            title="Suggested Revisions",
+            box=box.SIMPLE,
+            show_header=True,
+            header_style="bold cyan"
+        )
+        table.add_column("Option", style="cyan")
+        for i, rev in enumerate(revisions[:3], 1):
+            safe_rev = rev if not rev.startswith("Revised:") else rev[len("Revised:"):].strip()
+            # Truncate long revisions for display
+            display = safe_rev[:200] + "..." if len(safe_rev) > 200 else safe_rev
+            table.add_row(f"[i]Option {i}:[/i] {display}")
+
+        return table
 
 
 # Convenience function to create a validator from a lore file
