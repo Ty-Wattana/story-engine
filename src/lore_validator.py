@@ -247,7 +247,7 @@ class LoreValidator:
     """Validates user input against lore using LLM-based semantic analysis."""
 
     def __init__(self, lore_parser: LoreParser,
-                 model_name: str = "qwen3.5:9b-64k"):
+                 model_name: str = "qwen3.5:64k"):
         self.parser = lore_parser
         self.console = console
         self.model_name = model_name
@@ -501,7 +501,7 @@ Return is_valid=false if ANY conflict is found. Be thorough in checking against 
         for i, conflict in enumerate(error.conflicts, 1):
             severity_icon = {
                 "error": "[red][!]",
-                "warning": "[yellow][!]}",
+                "warning": "[yellow][!]",
                 "info": "[gray][i]"}
             lines.append(f"{severity_icon.get(conflict.severity, '[?]')} [?] Conflict {i}: {conflict.conflict_message}\n")
 

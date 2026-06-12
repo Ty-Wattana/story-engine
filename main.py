@@ -25,7 +25,7 @@ def initialize_game(llm: LLMClient) -> Player:
     system_prompt = llm._load_system_prompt()
 
     console.print("\n[yellow]=== System Prompt Preview ===[/yellow]")
-    console.print(system_prompt[:500] + "[\n\n")
+    console.print(system_prompt[:500] + "[\n\n", markup=False)
 
     try:
         with console.status("[yellow]Parsing background with local LLM...[/yellow]"):
@@ -43,7 +43,10 @@ def initialize_game(llm: LLMClient) -> Player:
     parser.parse_markdown("data/lore_summary.md")
     validator = LoreValidator(parser)
 
-    is_valid, conflicts, suggestions = validator.validate_input(backstory)
+    result = validator.validate_input(backstory)
+    is_valid = result.is_valid
+    conflicts = result.conflicts
+    suggestions = result.suggestions
 
     if not is_valid:
         console.print(Panel(
@@ -51,7 +54,7 @@ def initialize_game(llm: LLMClient) -> Player:
             f"[yellow]Conflicts found: {len(conflicts)}[/yellow]",
             title="Lore Conflict Detected",
             border_style="red",
-            box=box.DOUBLED
+            box=box.DOUBLE
         ))
 
         # Negotiation loop
@@ -69,7 +72,7 @@ def initialize_game(llm: LLMClient) -> Player:
                     "warning": "[yellow][!]}",
                     "info": "[cyan][i]"
                 }.get(conflict.severity, "[?]")
-                console.print(f"{severity_marker} {conflict.conflict}")
+                console.print(f"{severity_marker} {conflict.fact.fact}")
 
             # Build revision suggestions
             if suggestions:
@@ -91,7 +94,7 @@ def initialize_game(llm: LLMClient) -> Player:
                 "[yellow] (a) Accept suggested revision[/yellow]\n"
                 "[yellow] (r) Revise the input yourself[/yellow]\n"
                 "[yellow] (s) Skip this validation[/yellow]\n"
-                "> [/yellow]"
+                "> "
             )
 
             if "a" in response.lower():
@@ -109,7 +112,10 @@ def initialize_game(llm: LLMClient) -> Player:
                 revised_backstory = console.input("> ")
 
                 # Re-validate the revised input
-                is_valid, conflicts, suggestions = validator.validate_input(revised_backstory)
+                result = validator.validate_input(revised_backstory)
+                is_valid = result.is_valid
+                conflicts = result.conflicts
+                suggestions = result.suggestions
             else:
                 # Skip validation - warn but continue
                 console.print("\n[yellow]Skipping validation. Using extracted profile as-is.[/yellow]")

@@ -7,7 +7,7 @@ from typing import Type, TypeVar
 T = TypeVar('T', bound=BaseModel)
 
 class LLMClient:
-    def __init__(self, model_name: str = "qwen3.5:9b-64k"): # llama3.1:latest 
+    def __init__(self, model_name: str = "qwen3.5:64k"): # llama3.1:latest 
         self.model = model_name
 
     def _load_system_prompt(self, prompt_file: str = "prompts/character_creation.md") -> str:
