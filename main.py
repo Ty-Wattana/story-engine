@@ -111,11 +111,24 @@ def initialize_game(llm: LLMClient) -> Player:
                 console.print("[dim](e.g., choose an existing faction, adjust magic usage, etc.)[/dim]\n>")
                 revised_backstory = console.input("> ")
 
+                # Re-parse the revised backstory through the LLM to get a new profile
+                system_prompt = llm._load_system_prompt()
+                try:
+                    revised_profile = llm.generate_structured(system_prompt, revised_backstory, CharacterProfile)
+                except Exception as e:
+                    console.print(f"\n[red]Error parsing your revised backstory: {e}[/red]")
+                    console.print("[yellow]Please try again or use a different revision.[/yellow]")
+                    continue
+
                 # Re-validate the revised input
                 result = validator.validate_input(revised_backstory)
                 is_valid = result.is_valid
                 conflicts = result.conflicts
                 suggestions = result.suggestions
+
+                # Use the newly parsed profile if validation passed
+                if is_valid:
+                    profile = revised_profile
             else:
                 # Skip validation - warn but continue
                 console.print("\n[yellow]Skipping validation. Using extracted profile as-is.[/yellow]")
