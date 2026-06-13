@@ -5,10 +5,10 @@ import sys
 sys.path.insert(0, os.path.abspath("."))
 
 from src.state import Player, WorldState, PlayerStats, StateManager
-from src.schemas import CharacterProfile, ActionResult
+from src.schemas import CharacterProfile
 from src.llm_client import LLMClient
 from src.lore_validator import LoreParser, LoreValidator, create_validator
-from src.action_engine import resolve_action, apply_mechanical_effects
+from src.action_engine import resolve_action
 
 from rich.console import Console
 from rich.panel import Panel
@@ -22,70 +22,6 @@ console = Console()
 # ---------------------------------------------------------------------------
 # Phase 1: Status display helpers
 # ---------------------------------------------------------------------------
-
-def _show_player_stats(state_mgr: StateManager) -> None:
-    """Display player stats as a Rich panel."""
-    p = state_mgr.player
-    s = p.stats
-
-    rows = [
-        f"[cyan]Str:[/cyan] {s.strength:+3} ({s.bonus('strength'):+d})",
-        f"[cyan]Dex:[/cyan] {s.dexterity:+3} ({s.bonus('dexterity'):+d})",
-        f"[cyan]Int:[/cyan] {s.intelligence:+3} ({s.bonus('intelligence'):+d})",
-        f"[cyan]Wis:[/cyan] {s.wisdom:+3} ({s.bonus('wisdom'):+d})",
-        f"[cyan]Con:[/cyan] {s.constitution:+3} ({s.bonus('constitution'):+d})",
-        f"[cyan]Cha:[/cyan] {s.charisma:+3} ({s.bonus('charisma'):+d})",
-    ]
-
-    table = Table(box=box.SIMPLE, show_header=False, header_style="bold magenta")
-    for r in rows:
-        table.add_row(r)
-
-    console.print(Panel(table, title="[bold white]Stats", border_style="blue"))
-
-
-def _show_inventory(state_mgr: StateManager) -> None:
-    """Display inventory as a compact list."""
-    inv = state_mgr.player.inventory
-    if not inv:
-        console.print("[dim]Inventory: (empty)[/dim]")
-        return
-    t = Table(box=box.SIMPLE, title="[white]Inventory", show_header=False)
-    for item in inv:
-        t.add_row(f"  •  {item}")
-    console.print(t)
-
-
-def _show_status(state_mgr: StateManager) -> None:
-    """Full status header for each turn."""
-    w = state_mgr.world
-
-    # Location banner
-    console.print(f"\n[bold cyan]═══ [{w.current_location.capitalize()}][bold cyan] ═══[/bold cyan]\n")
-
-    with console.status("[dim]Loading player data...[/dim]") as st:
-        console.clear()  # clear status text but keep panel
-        st.stop()
-
-    p = state_mgr.player
-    header = (
-        f"[bold]{p.name}[/bold] — [bold]Faction:[/bold] {p.faction}\n"
-        f"[bold]Goal:[/bold] {p.goal}  |  [bold]Motivation:[/bold] {p.motivation}\n"
-        f"[dim](Turn {w.turn_count})[/dim]"
-    )
-    console.print(Panel(header, title="[green]Player Status", border_style="green"))
-
-    stats_panel = Panel(_build_stats_table(state_mgr), title="[cyan]Stats", border_style="blue")
-    inv_panel = Panel(_build_inventory_table(state_mgr), title="[dim]Inventory", border_style="dim")
-    rep_items = [f"  •  {k}: +{v}" for k, v in p.reputation.items()]
-    if not rep_items:
-        rep_panel = Panel("[dim]Reputation: (none yet)[/dim]", title="[magenta]Reputation", border_style="magenta")
-    else:
-        rep_panel = Panel("\n".join(rep_items), title="[magenta]Reputation", border_style="magenta")
-
-    console.print(stats_panel)
-    console.print(inv_panel)
-
 
 def _build_stats_table(state_mgr: StateManager) -> Table:
     s = state_mgr.player.stats
@@ -104,55 +40,104 @@ def _build_inventory_table(state_mgr: StateManager) -> Table:
     t = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
     for item in inv:
         t.add_row("  •  ", item)
-    # Strip panel wrapper — return the raw string
     return t
+
+
+def _show_status(state_mgr: StateManager) -> None:
+    """Full status header for each turn."""
+    w = state_mgr.world
+    p = state_mgr.player
+
+    # Location banner
+    console.print(f"\n[bold cyan]═══ [{w.current_location.capitalize()}] ═══[/bold cyan]\n")
+
+    header = (
+        f"[bold]{p.name}[/bold] — [bold]Faction:[/bold] {p.faction}\n"
+        f"[bold]Goal:[/bold] {p.goal}  |  [bold]Motivation:[/bold] {p.motivation}\n"
+        f"[dim](Turn {w.turn_count})[/dim]"
+    )
+    console.print(Panel(header, title="[green]Player Status", border_style="green"))
+
+    stats_panel = Panel(_build_stats_table(state_mgr), title="[cyan]Stats", border_style="blue")
+    inv_panel = Panel(_build_inventory_table(state_mgr), title="[dim]Inventory", border_style="dim")
+    rep_items = [f"  •  {k}: +{v}" for k, v in p.reputation.items()]
+    if not rep_items:
+        rep_panel = Panel("[dim]Reputation: (none yet)[/dim]", title="[magenta]Reputation", border_style="magenta")
+    else:
+        rep_panel = Panel("\n".join(rep_items), title="[magenta]Reputation", border_style="magenta")
+
+    console.print(stats_panel)
+    console.print(inv_panel)
+    console.print(rep_panel)
 
 
 # ---------------------------------------------------------------------------
 # Phase 2: Display resolved action results
 # ---------------------------------------------------------------------------
 
-def _display_roll(dice_roll: int, modifier: int, final_score: int, dc: int) -> None:
-    """Show dice roll result as an inline narrative-style line."""
-    if final_score >= dc:
-        marker = "[green]✓ HIT[/green]"
-    else:
-        marker = "[red]✗ MISS[/red]"
-    console.print(f"  [dim]Roll:[/dim] d20[{dice_roll:+3}] {'+' if modifier >= 0 else ''}{modifier} → {final_score} [bold {marker}] (DC={dc})")
+def _display_outcome(result: dict, effects_applied: list[str], flavor_text: str | None = None) -> None:
+    """Display a unified outcome panel for success / partial / failure."""
 
+    lines: list[str] = []
+    outcome = result["outcome_level"]
+    dice_roll = result["dice_roll"]
+    modifier = result["modifier"]
+    final_score = result["final_score"]
+    dc = result["target_dc"]
+    advantage = result.get("advantage", "none")
 
-def _display_action_result(result: dict) -> None:
-    """Print the full resolve output in a Rich panel."""
-    lines = []
+    # Compact turn summary (shown after the panel as a one-liner)
+    compact: list[str] = []
 
-    # Roll line
-    lines.append(f"[dim]Action:[/dim] {result['action_type']}  |  [dim]Verb:[/dim] {result.get('verb', '?')}")
-    if result.get("target_entity"):
-        lines.append(f"[dim]Target:[/dim] {result['target_entity']}")
-
-    # Roll display
-    _display_roll(result["dice_roll"], result["modifier"], result["final_score"], result["target_dc"])
+    # Dice line
+    sign = "+" if modifier >= 0 else ""
+    adv_marker = f" ({advantage})" if advantage != "none" else ""
+    hit_or_miss = "[green]HIT[/green]" if result["success"] else "[red]MISS[/red]"
+    lines.append(f"[dim]Roll:[/dim] d20[{dice_roll:+3}]{adv_marker} {sign}{modifier} → {final_score} [bold {hit_or_miss}] (DC={dc})")
 
     # Outcome level
-    outcome = result["outcome_level"]
-    level_colors = {
-        "crit_fresh": "bold green",
-        "success": "green",
-        "partial": "yellow",
-        "failure": "red dim",
-        "crit": "bold magenta",
+    outcome_colors = {
+        "crit_fresh": "[bold magenta]",
+        "success": "[green]",
+        "partial": "[yellow]",
+        "failure": "[red dim]",
+        "crit": "[bold green]",
     }
-    color = level_colors.get(outcome, "white")
+    color = outcome_colors.get(outcome, "[white]")
     lines.append(f"[{color}]Outcome: {outcome.replace('_', ' ').upper()}[/]")
 
-    # Effects summary
-    effects = result.get("mechanical_effect", {})
-    if effects:
-        lines.append("\n[bold]Effects:[/]")
-        for k, v in effects.items():
-            lines.append(f"  [cyan]{k}[/cyan] → {v}")
+    # Effects summary (shown for ALL outcomes now)
+    if effects_applied:
+        lines.append("")
+        lines.append("[bold]Effects:[/]")
+        for e in effects_applied:
+            lines.append(f"  [cyan]{e}[/cyan]")
 
-    return "\n".join(lines)
+    # Flavor text (shown for all outcomes)
+    if flavor_text:
+        lines.append("")
+        lines.append(f"[italic][dim]The outcome:[/dim] {flavor_text}[/italic]")
+
+    panel_border = "green" if result["success"] else ("yellow" if outcome == "partial" else "red")
+    console.print(Rule("[bold]" + outcome.replace("_", " ").upper() + "[/]", style=panel_border))
+    for line in lines:
+        console.print(line)
+
+    # Compact summary (shown at very end of turn, before next prompt)
+    compact = f"[dim][Turn {result.get('turn', '?')}][/dim]"
+    if result["success"]:
+        if outcome == "crit_fresh":
+            compact += f" [bold magenta]CRIT![/]"
+        elif outcome == "crit":
+            compact += f" [bold green]CRIT![/]"
+        else:
+            compact += f" [green]✓[/]"
+    else:
+        if outcome == "partial":
+            compact += f" [yellow]~[/]"
+        else:
+            compact += f" [red]✗[/]"
+    console.print(compact)
 
 
 # ---------------------------------------------------------------------------
@@ -262,22 +247,31 @@ def initialize_game(llm: LLMClient) -> Player:
 
 
 # ---------------------------------------------------------------------------
-# Phase 5: The real game loop
+# Phase 5: The real game loop (revamped)
 # ---------------------------------------------------------------------------
 
-def _show_dm_choices(options: list[str]) -> int | None:
-    """Present DM choices as a numbered table. Returns the user's selection index (1-based) or None."""
+def _show_dm_choices(options: list[str]) -> None:
+    """Present DM choices as a numbered table."""
     if not options:
-        return None
+        return
     t = Table(box=box.SIMPLE, title="[bold yellow]Available Actions[/bold yellow]", show_header=False)
     for i, opt in enumerate(options, 1):
         t.add_row(f"[bold cyan]{i}:[][dim]•[/dim]", opt)
     console.print(Panel(t, border_style="yellow", expand=True))
-    return None  # Let the caller handle input
 
 
 def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
-    """Main turn-based loop. Keeps running until the player quits."""
+    """Main turn-based loop. Keeps running until the player quits.
+
+    Revamped flow per turn:
+      1. advance_turn() + snapshot (once)
+      2. LLM choices (if state changed or first time)
+      3. Parse input via LLM -> ActionParseResult
+      4. resolve_action() with advantage/proficiency
+      5. apply_engine_effects(outcome_level, action_type) — for ALL outcomes
+      6. generate_flavor_text() — for ALL outcomes
+      7. display outcome panel + compact summary
+    """
     state_mgr = StateManager(player, world)
 
     console.print("\n[blue]--- Game Loop Starting ---[/blue]")
@@ -290,14 +284,16 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
     while True:
         world.advance_turn()
 
-        choices_list: list[str] = []
-        try:
-            states_snapshot = state_mgr.snapshot()
-            choices_list = llm.generate_choices(states_snapshot)
-        except Exception as e:
-            console.print(f"[dim][choice-gen failed, continuing with free-text only]{e}[/dim]")
+        # --- Snapshot ONCE this turn ---
+        snapshot = state_mgr.snapshot()
 
-        # Show choices alongside a prompt
+        # --- DM choices (refreshed every turn for now — can cache later) ---
+        try:
+            choices_list = llm.generate_choices(snapshot)
+        except Exception as e:
+            console.print(f"[dim][choice-gen failed, continuing with free-text only] {e}[/dim]")
+            choices_list = []
+
         if choices_list:
             _show_dm_choices(choices_list)
             console.print("[yellow]Type the number to select, or type your own action.[/]")
@@ -317,73 +313,47 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
 
         # --- Parse action ---
         try:
-            action_result_raw = llm.generate_action_result(parsed_input, state_mgr.snapshot())
-            # Also get stat bonus from player for the modifiers
-            stat_name = getattr(action_result_raw.modifiers, "target_stat", None)
-            stat_modifier = 0
-            if stat_name:
-                stat_modifier = player.stats.bonus_for_choice() if not hasattr(player.stats, stat_name) else player.stats.bonus(stat_name)
-
+            action_result_raw = llm.generate_action_result(parsed_input, snapshot)
         except Exception as e:
             console.print(f"\n[red]Action parse failed: {e}[/red]")
+            _show_status(state_mgr)
             continue
 
-        # --- Resolve the action mechanically ---
-        mod_kwargs = {}
-        if stat_name:
-            mod_kwargs["target_stat"] = stat_name
+        # --- Resolve the action mechanically (using advantage from parser + computed proficiency) ---
+        stat_name = getattr(action_result_raw.modifiers, "target_stat", None)
+        adv = getattr(action_result_raw.modifiers, "advantage", "none") or "none"
+        tool_used = getattr(action_result_raw.modifiers, "tool_used", None)
 
         resolve_output = resolve_action(
             action_type=action_result_raw.action_type,
-            modifiers_info=mod_kwargs,
-            world_context=state_mgr.snapshot().get("location", ""),
+            stat_name=stat_name,
+            tool_modifier=1 if tool_used else 0,       # placeholder: real tool bonus from lookup
+            advantage=adv,
+            proficiency=state_mgr.proficiency,
+            world_context=snapshot.get("location", ""),
         )
-        # Inject computed modifier into the output dict
-        resolve_output["modifier"] += stat_modifier
-        resolve_output["final_score"] = resolve_output["dice_roll"] + resolve_output["modifier"]
 
-        if not resolve_output["success"]:
-            console.print("\n[yellow]Action failed. Your attempt does not succeed.[/yellow]")
-            _show_status(state_mgr)  # refresh for feedback
-            continue
+        # Always apply engine effects — for ALL outcomes (success / partial / failure)
+        effects_applied = state_mgr.apply_outcome_effects(resolve_output["outcome_level"], action_result_raw.action_type)
+        effect_display = [f"{k} → {v}" for k, v in effects_applied.items()] if effects_applied else ["(no mechanical change this turn)"]
 
-        # --- Apply mechanical effects to state ---
-        try:
-            state_mgr.apply_effect(resolve_output.get("mechanical_effect", {}))
-        except Exception as e:
-            console.print(f"[dim][effect-apply failed]{e}[/dim]")
-
-        _display_action_result(construct_action_result_dict(action_result_raw, resolve_output))
-
-        # --- Flavor text via LLM ---
+        # Always generate flavor text — for ALL outcomes
         try:
             narrative = llm.generate_flavor_text(
-                context=f"action: {action_result_raw.intent}, outcome: success, location: {world.current_location}",
-                instruction=f"Dungeon master describes the successful outcome of '{parsed_input}'. Keep under 3 sentences."
+                context=f"action: {action_result_raw.intent}, outcome: {resolve_output['outcome_level']}, location: {world.current_location}",
+                instruction=f"Dungeon master describes the outcome of '{parsed_input}'. Keep under 3 sentences."
             )
-            console.print(f"\n[italic]The outcome: [white]{narrative}[/italics]")
         except Exception as e:
             console.print(f"[dim][flavor-text failed] {e}[/dim]")
+            narrative = None
+
+        # --- Display unified outcome panel ---
+        resolve_output["turn"] = world.turn_count
+        resolve_output["advantage"] = adv
+        _display_outcome(resolve_output, effect_display, narrative)
 
         # Refresh status for next turn
         _show_status(state_mgr)
-
-
-def construct_action_result_dict(parsed, resolved: dict) -> dict:
-    """Merge parsed action fields into a combined output dict."""
-    return {
-        **resolved,
-        "intent": parsed.intent,
-        "target_entity": parsed.target_entity,
-        "is_combat": parsed.is_combat,
-        "action_type": parsed.action_type,
-        "verb": parsed.verb,
-        "modifiers": {
-            "target_stat": getattr(parsed.modifiers, "target_stat", None),
-            "tool_used": getattr(parsed.modifiers, "tool_used", None),
-            "advantage": getattr(parsed.modifiers, "advantage", "none"),
-        },
-    }
 
 
 def main():

@@ -23,12 +23,13 @@ Extract these fields exactly:
 - modifiers.advantage: 'none', 'advantage', or 'disadvantage'
 - raw_input: copy of the original player input verbatim
 
-Rules:
+CRITICAL RULES:
 1. Map verbs to sensible stats (sneak -> dexterity, attack -> strength, persuade -> charisma, etc.)
 2. Only mark is_combat=true if there's clear hostile intent
 3. Be precise - don't invent items or NPCs that don't exist in context
 4. If the input mentions a specific stat to use, extract it as target_stat
-5. Keep raw_input exactly as typed (preserve quotes, capitalization)
+5. DO NOT predict state changes (inventory, reputation). Those are computed by the game engine from deterministic rules based on the outcome of the action roll.
+6. Keep raw_input exactly as typed (preserve quotes, capitalization)
 
 Respond ONLY with valid JSON no markdown fences."""
 
@@ -91,6 +92,9 @@ Respond with ONLY a JSON array of strings - no markdown fences."""
 
     def generate_action_result(self, user_input: str, state_context: dict) -> ActionParseResult:
         """Parse free-text player input into a structured ActionParseResult.
+
+        The LLM only answers *what* the player tried to do — not what happens.
+        Outcome effects are determined by the engine from deterministic rules.
 
         Args:
             user_input: exact text the player typed or selected

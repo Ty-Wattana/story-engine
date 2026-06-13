@@ -172,8 +172,13 @@ def build_outcome_panel(result: Dict[str, Any]) -> Panel:
 
     lines.append("Outcome: [%s]" % text_result)
 
-    # Mechanical effects summary
-    effects = result.get("mechanical_effect", {})
+    # Effects summary — supports both legacy dict and new list-of-OutcomeEffect formats
+    raw_effects = result.get("effects", [])
+    if isinstance(raw_effects, dict):
+        effects = raw_effects  # legacy: mechanical_effect stored here as dict
+    else:
+        effects = {e["key"]: e["value"] for e in raw_effects if isinstance(e, dict)} if isinstance(raw_effects, list) else {}
+
     if effects:
         lines.append("")
         lines.append("[bold]Effects:[/]")

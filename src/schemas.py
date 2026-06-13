@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any, Literal, Union
+from typing import List, Optional, Dict, Any, Literal
 
 
 # ---------------------------------------------------------------------------
@@ -13,7 +13,7 @@ class CharacterProfile(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Action input schemas  –  what the LLM extracts from free-text
+# Action input schemas — what the LLM extracts from free-text
 # ---------------------------------------------------------------------------
 
 class ActionModifiers(BaseModel):
@@ -24,9 +24,13 @@ class ActionModifiers(BaseModel):
 
 
 class ActionParseResult(BaseModel):
-    """Structured interpretation of user free-text input."""
+    """Structured interpretation of user free-text input.
 
-    intent: str = Field(description="A 1-3 word summary of the player's attempted action.")
+    The LLM only answers *what* the player tried — not what happens.
+    Outcome effects are determined by the engine from deterministic rules.
+    """
+
+    intent: str = Field(description="A 1-3 word summary of the action.")
     target_entity: Optional[str] = Field(None, description="The NPC, item, or location targeted by the action.")
     is_combat: bool = Field(False, description="True if the action involves physical violence or hostile magic.")
 
@@ -34,30 +38,41 @@ class ActionParseResult(BaseModel):
     action_type: Literal["combat", "stealth", "social", "exploration", "item"] = Field(
         description="The category this action falls under."
     )
-    verb: str = Field(description="The dominant action verb extracted from the user input (e.g. 'sneak', 'attack', ' persuade').")
+    verb: str = Field(description="The dominant action verb extracted from the user input (e.g. 'sneak', 'attack', 'persuade').")
     modifiers: ActionModifiers = Field(
         default_factory=ActionModifiers,
         description="Additional mechanical context for resolving this action."
     )
     raw_input: str = Field(description="The exact original text the player typed or selected.")
 
-    # Aliases so legacy code that reads `is_combat` from parsed JSON still works
-    model_config = {"extra": "allow"}
-
 
 # ---------------------------------------------------------------------------
-# Action resolution schemas  –  what the action engine produces
+# Action resolution schemas — what the engine produces per outcome level
 # ---------------------------------------------------------------------------
+
+OutcomeLevel = Literal["crit_fresh", "failure", "partial", "success", "crit"]
+
+
+class OutcomeEffect(BaseModel):
+    """A single state-mutation effect applied by the engine."""
+    key: str = Field(description="Effect key in entity.field.operator form. Examples: 'player.inventory.add', 'world.health.decrement'.")
+    value: Any = Field(description="The value to apply.")
+
 
 class ActionResult(BaseModel):
     """Outcome of resolving an action through the action engine."""
 
-    success: bool = Field(description="Whether the target DC was met or exceeded.")
+    intent: str = Field(description="What the player attempted.")
+    verb: str = Field(description="The dominant action verb.")
+    target_entity: Optional[str] = Field(None, description="Target of the action (None if none).")
+
     dice_roll: int = Field(description="The raw d20 roll value.")
-    modifier: int = Field(description="Stat + proficiency + misc modifiers applied to the roll.")
+    modifier: int = Field(description="Stat + proficiency + tool modifiers applied to the roll.")
     final_score: int = Field(description="dice_roll + modifier — compared against the Difficulty Class.")
     target_dc: int = Field(description="The Difficulty Class this action needed to meet or exceed.")
-    outcome_level: Literal["crit_fresh", "failure", "partial", "success", "crit"] = Field(
+    advantage: str = Field(description="advantage / disadvantage / none context for this roll.")
+
+    outcome_level: OutcomeLevel = Field(
         description=(
             "crit_fresh — rolled a 20 (automatically succeed, bonus effect)\n"
             "failure  — rolled a 1  (automatically fail, penalty applied)\n"
@@ -66,10 +81,14 @@ class ActionResult(BaseModel):
             "crit     — exceeded the DC by 10 or more"
         )
     )
-    mechanical_effect: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Key-value pairs describing state mutation (e.g. {'inventory.add': 'iron_key', 'reputation.Iron Circle': +1})."
+
+    success: bool = Field(description="Whether the target DC was met or exceeded.")
+
+    effects: list[OutcomeEffect] = Field(
+        default_factory=list,
+        description="Engine-computed state changes applied to the world. Empty only when nothing changes."
     )
+
     narrative_prompt: str = Field(
         description="Plain-text instructions for the narrative engine to generate flavor text."
     )

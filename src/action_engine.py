@@ -2,24 +2,23 @@
 Action Engine — the mechanical heart of the game loop.
 
 Handles all non-narrative game math:
-  1) Dice rolling (d20 with advantage/disadvantage & stat mods)
-  2) DC evaluation → outcome_level
-  3) Effect application → in-place state mutation
+  1) Dice rolling (d20 with advantage/disadvantage & stat/proficiency mods)
+  2) DC evaluation -> outcome_level
+  3) Effect application -> deterministic state mutation via StateManager
+
+Design principle: effects are computed by the engine, never predicted by LLM.
 """
 from __future__ import annotations
 
 import random
-import operator
-from typing import Dict, Any, Literal, Union, Callable
-from dataclasses import dataclass, field
+from typing import Any, Dict, Literal
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 MAX_D20 = 20
-CRIT_THRESHOLD = 18          # final_score (not roll) exceeded by ≥10?
-PARTIAL_RANGE = 5            # within this many points of DC
+PARTIAL_RANGE = 5            # "within" margin (exclusive): final_score - target_dc > -PARTIAL_RANGE -> partial
 
 
 # ---------------------------------------------------------------------------
@@ -34,126 +33,47 @@ class DiceSystem:
         return random.randint(1, MAX_D20)
 
     @classmethod
-    def roll_attack(cls) -> tuple[int, int]:
-        """Return (roll_value, final_score_after_mod).
+    def roll_attack(
+        cls,
+        advantage: Literal["none", "advantage", "disadvantage"] = "none",
+    ) -> tuple[int, int]:
+        """Roll a d20 with optional advantage/disadvantage.
 
-        Handles advantage/disadvantage and stat modifiers.
-
-        Returns tuple of (raw_d20, final_score) — modifier is returned
-        alongside so the caller can populate ActionResult fields exactly.
+        Returns (raw_d20, pre_stat_score) — stat/proficiency modifiers are applied
+        by the caller *after* this returns so they can display them independently.
         """
-        base_roll = cls.roll_d20()
-        adv = random.choice(["none", "disadvantage"])  # TODO: wired into context later
-
-        if adv == "disadvantage":
-            roll_again = cls.roll_d20()
-            raw = min(base_roll, roll_again)
+        if advantage == "advantage":
+            raw = max(cls.roll_d20(), cls.roll_d20())
+        elif advantage == "disadvantage":
+            raw = min(cls.roll_d20(), cls.roll_d20())
         else:
-            raw = base_roll
+            raw = cls.roll_d20()
 
-        modifier = DiceSystem._compute_modifier(adv)
-        return raw, raw + modifier
-
-    @staticmethod
-    def _compute_modifier(adv: str) -> int:
-        # Skeleton — real stat bonuses come from PlayerStats in Phase 3.
-        # For now neutral so we don't accidentally bias outcomes.
-        return 0
+        return raw, raw
 
 
 # ---------------------------------------------------------------------------
-# Skill Resolver
+# DC Resolver — maps action_type -> base DC
 # ---------------------------------------------------------------------------
 
-ACTION_DC_MAP: Dict[str, Callable[[str], int]] = {
-    "combat":     lambda _: 12,
-    "stealth":    lambda ctx: 14 if "sleeping" in ctx.lower() else 15,
-    "social":     lambda _: 10,  # negotiated later
-    "exploration":lambda _: 12,
-    "item":       lambda _: 12,
+BASE_DC: Dict[str, int] = {
+    "combat":      12,
+    "stealth":     14,        # overridden to 15 in SkillResolver if context indicates sleeping target
+    "social":      10,
+    "exploration": 12,
+    "item":        12,
 }
 
 
 class SkillResolver:
-    """Maps action_type → skill check and determines the DC."""
+    """Maps action_type -> skill check and determines the DC."""
 
     @staticmethod
     def determine_dc(action_type: str, context: str = "") -> int:
-        return ACTION_DC_MAP.get(action_type, lambda _: 12)(context)
-
-    @classmethod
-    def roll(
-        cls,
-        action_type: str,
-        target_stat: str | None = None,
-        context: str = "",
-    ) -> tuple[int, int]:
-        """Delegate to DiceSystem and return (raw_roll, final_score)."""
-        return DiceSystem.roll_attack()
-
-
-# ---------------------------------------------------------------------------
-# Effect Applier  –  mutations via string-key → operator mapping
-# ---------------------------------------------------------------------------
-
-def _inc_rep(cur, val):
-    """Helper for reputation increments."""
-    d = cur or {}
-    key = str(val) + "_by"
-    return {**d, **{key: d.get(key, 0) + 1}}
-
-
-_EFFECT_MAP = {
-    "inventory.add":     lambda cur, val: cur + [val] if isinstance(cur, list) else None,
-    "inventory.remove":  lambda cur, val: [x for x in cur if x != val] if isinstance(cur, list) else None,
-    "reputation.inc":    _inc_rep,
-}
-
-
-def _set_nested(d: dict, key_path: str, value: Any) -> dict | None:
-    """Set a nested dict value given dot-separated key path."""
-    parts = key_path.rsplit(".", 1)
-    if len(parts) != 2:
-        return None
-    outer, inner = parts
-    d.setdefault(outer, {})[inner] = value
-    return d
-
-
-def apply_mechanical_effects(
-    state: Any,              # Player + WorldState passed in via caller
-    effects: Dict[str, Any],
-) -> dict:
-    """Mutate game state in place by interpreting effect keys.
-
-    Each key is one of:
-      inventory.add <val>   – append to player.inventory
-      inventory.remove <v>  – remove first match from player.inventory
-      reputation.inc <f>   – increment rep counter for faction f
-
-    Returns a summary dict of what actually changed (for logging).
-    """
-    applied: Dict[str, Any] = {}
-
-    for key_value_str, raw_val in effects.items():
-        parts = key_value_str.split(None, 1)
-        key = parts[0]
-        val = parts[1] if len(parts) > 1 else raw_val
-
-        # inventory additions/removals happen on *state* directly
-        if key == "inventory.add":
-            getattr(state, "inventory", []).append(val)
-            applied[key] = val
-        elif key == "inventory.remove":
-            inv = getattr(state, "inventory", [])
-            if val in inv:
-                inv.remove(val)
-            applied[key] = val
-        else:
-            # fallback: record but skip unknown effects silently
-            applied[f"unknown:{key}"] = val
-
-    return applied
+        dc = BASE_DC.get(action_type, BASE_DC["item"])
+        if action_type == "stealth" and "sleeping" in context.lower():
+            dc = 15
+        return dc
 
 
 # ---------------------------------------------------------------------------
@@ -168,16 +88,31 @@ def evaluate_outcome(
     target_dc: int,
     raw_roll: int | None = None,
 ) -> dict[str, Any]:
-    """Map (raw_roll, final_score, DC) → outcome_level + success flag."""
+    """Map (raw_roll, final_score, DC) -> outcome_level + success flag.
 
-    if final_score >= CRIT_THRESHOLD and final_score >= target_dc * 2:
+    Rules (D&D 5e style):
+      - Natural 20 -> crit_fresh (auto-succeed, bonus effect)
+      - Natural 1  -> failure   (auto-fail, penalty applied)
+      - final_score >= target_dc and margin >= 10 -> crit
+      - final_score >= target_dc                    -> success
+      - final_score < target_dc and margin <= 5    -> partial
+      - otherwise                                  -> failure
+    """
+
+    # Auto crit / auto fail on raw roll before any modifier
+    if raw_roll == MAX_D20:
+        return {"outcome_level": "crit_fresh", "success": True}
+    if raw_roll == 1:
+        return {"outcome_level": "failure", "success": False}
+
+    margin = final_score - target_dc
+
+    if margin >= 10:
         level: OutcomeLevel = "crit"
-    elif final_score == MAX_D20 and not raw_roll == 1:
-        level = "crit_fresh"
-    elif final_score - target_dc < PARTIAL_RANGE and final_score < target_dc:
-        level = "partial"
-    elif final_score >= target_dc:
+    elif margin >= 0:
         level = "success"
+    elif margin > -PARTIAL_RANGE:
+        level = "partial"
     else:
         level = "failure"
 
@@ -193,30 +128,66 @@ def evaluate_outcome(
 
 def resolve_action(
     action_type: str,
-    modifiers_info: dict[str, Any] | None = None,
+    stat_name: str | None = None,
+    tool_modifier: int = 0,
+    advantage: Literal["none", "advantage", "disadvantage"] = "none",
+    proficiency: int = 2,
     world_context: str = "",
 ) -> dict[str, Any]:
     """Public API — call from the game loop to fully resolve an action.
 
-    Returns a dict shaped like ActionResult (compatible for validation).
+    Args:
+        action_type:   one of combat/stealth/social/exploration/item
+        stat_name:     player stats field ('strength', 'dexterity', etc.)
+        tool_modifier: bonus from wielded tool/weapon (0 if none)
+        advantage:     context-derived advantage/disadvantage for this roll
+        proficiency:   current proficiency bonus (from WorldState.turn_count)
+        world_context: current location string for DC calculation
+
+    Returns a dict shaped like ActionResult. Effects are *not* computed here —
+    StateManager.apply_outcome_effects() handles that based on outcome_level + action_type.
     """
-    mod = modifiers_info or {}
     dc = SkillResolver.determine_dc(action_type, world_context)
 
-    raw_roll, final_score = SkillResolver.roll(
-        action_type,
-        target_stat=mod.get("target_stat"),
-        context=world_context,
-    )
+    # Roll
+    raw_roll, pre_score = DiceSystem.roll_attack(advantage)
+
+    # Total modifier chain: stat_bonus + proficiency + tool
+    modifier = 0
+    if stat_name:
+        # Placeholder for now — caller passes stat value directly
+        pass
+    modifier += proficiency
+    modifier += tool_modifier
+
+    final_score = pre_score + modifier
 
     outcome = evaluate_outcome(final_score, dc, raw_roll)
 
     return {
-        "dice_roll":   raw_roll,
-        "modifier":    final_score - raw_roll,
-        "final_score": final_score,
-        "target_dc":   dc,
+        "dice_roll":      raw_roll,
+        "pre_score":      pre_score,
+        "modifier":       modifier,
+        "stat_bonus":     0,          # caller provides stat via action_type mapping
+        "proficiency":    proficiency,
+        "tool_modifier":  tool_modifier,
+        "advantage":      advantage,
+        "final_score":    final_score,
+        "target_dc":      dc,
         **outcome,
-        "mechanical_effect": {},  # Phase 3: populated by EffectApplier on actual state mutation
-        "narrative_prompt": "",  # Phase 6: StoryFormatter fills this
+        "mechanical_effect": {},       # legacy key kept for compatibility
+        "narrative_prompt": "",         # StoryFormatter fills this later
     }
+
+
+def apply_outcome_effects(
+    state: Any,              # StateManager passed in by caller
+    outcome_level: str,
+    action_type: str,
+) -> dict[str, Any]:
+    """Apply engine-determined effects based on outcome + action type.
+
+    This is the *single* point where effects are computed — never LLM-predicted.
+    Returns a summary dict of what actually changed (for logging/display).
+    """
+    return state.apply_outcome_effects(outcome_level, action_type)
