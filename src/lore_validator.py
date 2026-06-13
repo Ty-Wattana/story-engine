@@ -1,4 +1,4 @@
-﻿"""
+"""
 Lore Validation System with LLM-based semantic validation.
 
 This module provides:

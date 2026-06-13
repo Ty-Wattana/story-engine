@@ -266,9 +266,9 @@ class StateManager:
             # Full failure — targeted consequences (no arbitrary inventory deletion).
             penalty_rules = {
                 "combat":  lambda: {"player.stats.con_penalty.inc": -1},       # injury reduces con temporarily
-                "stealth": {"player.reputation.inc": "suspicion_raised"},     # now tracked as rep threshold
-                "social":  {"player.reputation.inc": "offended_officer"},     # now tracked as rep threshold
-                "exploration": {},   # exploration never penalizes — you simply don't find anything
+                "stealth": lambda: {"player.reputation.inc": "suspicion_raised"},     # now tracked as rep threshold
+                "social":  lambda: {"player.reputation.inc": "offended_officer"},     # now tracked as rep threshold
+                "exploration": lambda: {},   # exploration never penalizes — you simply don't find anything
                 "item":    lambda: {"player.inventory.add": "broken_tool"},   # lose the tool, get a broken one back
             }
             return penalty_rules.get(action_type, lambda: {})()
