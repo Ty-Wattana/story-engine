@@ -45,7 +45,7 @@ Rules:
 
 Respond with ONLY a JSON array of strings - no markdown fences."""
 
-    def __init__(self, model_name: str = "qwen3.5:9b-64k"):
+    def __init__(self, model_name: str = "qwen3.5:64k"):
         self.model = model_name
 
     # ------------------------------------------------------------------
