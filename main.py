@@ -90,10 +90,11 @@ def _display_outcome(result: dict, effects_applied: list[str], flavor_text: str 
     compact: list[str] = []
 
     # Dice line
-    sign = "+" if modifier >= 0 else ""
     adv_marker = f" ({advantage})" if advantage != "none" else ""
-    hit_or_miss = "[green]HIT[/green]" if result["success"] else "[red]MISS[/red]"
-    lines.append(f"[dim]Roll:[/dim] d20[{dice_roll:+3}]{adv_marker} {sign}{modifier} → {final_score} [bold {hit_or_miss}] (DC={dc})")
+    hit_color = "[green]" if result["success"] else "[red]"
+    hit_text = "HIT" if result["success"] else "MISS"
+    mod_str = f"{modifier:+d}"  # e.g. +3 or -2
+    lines.append(f"[dim]Roll:[/dim] d20[{dice_roll}]{adv_marker} {mod_str} → {final_score} [{hit_color}{hit_text}[/] (DC={dc})")
 
     # Outcome level
     outcome_colors = {
@@ -287,9 +288,9 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
         # --- Snapshot ONCE this turn ---
         snapshot = state_mgr.snapshot()
 
-        # --- DM choices (refreshed every turn for now — can cache later) ---
+        # --- DM choices (uses lightweight snapshot to avoid LLM echoing state text) ---
         try:
-            choices_list = llm.generate_choices(snapshot)
+            choices_list = llm.generate_choices(state_mgr.choices_snapshot())
         except Exception as e:
             console.print(f"[dim][choice-gen failed, continuing with free-text only] {e}[/dim]")
             choices_list = []
@@ -337,11 +338,23 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
         effects_applied = state_mgr.apply_outcome_effects(resolve_output["outcome_level"], action_result_raw.action_type)
         effect_display = [f"{k} → {v}" for k, v in effects_applied.items()] if effects_applied else ["(no mechanical change this turn)"]
 
-        # Always generate flavor text — for ALL outcomes
+        # Always generate flavor text — for ALL outcomes. Use rich dynamic state so the LLM
+        # never recycles the same prose (it gets fresh facts to work with each turn).
         try:
+            inventory_list = ", ".join(state_mgr.player.inventory[-3:]) or "(empty)"
+            rep_items = ", ".join(f"{k}(+{v})" for k, v in list(state_mgr.player.reputation.items())[-2:]) or "(none)"
+            new_effects = "; ".join(effect_display) if effect_display else "(no effects)"
+            flavor_context = (
+                f"You just {action_result_raw.intent} at '{world.current_location}'.\n"
+                f"Inventory now: {inventory_list}\n"
+                f"Reputation: {rep_items}\n"
+                f"Effects this turn: {new_effects}\n"
+                f"Outcome: {resolve_output['outcome_level']}\n"
+                f"Turn: {world.turn_count}"
+            )
             narrative = llm.generate_flavor_text(
-                context=f"action: {action_result_raw.intent}, outcome: {resolve_output['outcome_level']}, location: {world.current_location}",
-                instruction=f"Dungeon master describes the outcome of '{parsed_input}'. Keep under 3 sentences."
+                context=flavor_context,
+                instruction=f"DM narrates the outcome of this action in 1-2 sentences. Ground it in what just happened — reference specific items, NPCs, or locations that changed."
             )
         except Exception as e:
             console.print(f"[dim][flavor-text failed] {e}[/dim]")

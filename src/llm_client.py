@@ -44,6 +44,8 @@ Rules:
 4. Don't suggest actions that are impossible given the lore/context
 5. Include at least one creative/unexpected but logical option
 
+CRITICAL: DO NOT copy any text from game_state into your options. Never repeat descriptions, inventory lists, or narrative prose. Write original action verbs only (e.g., "Sneak past the guards", "Ask the elder about rumors"). The game state is context for generating ideas — not content to echo back.
+
 Respond with ONLY a JSON array of strings - no markdown fences."""
 
     def __init__(self, model_name: str = "qwen3.5:64k"):
@@ -75,16 +77,61 @@ Respond with ONLY a JSON array of strings - no markdown fences."""
         raw_json = response['message']['content']
         return schema.model_validate_json(raw_json)
 
+    FLAVOR_SYSTEM_PROMPT = (
+        "You are a dungeon master narrator for a dark fantasy RPG.\n"
+        "Write ONLY the narrative scene description — no thinking, no planning, no meta-commentary.\n"
+        "CRITICAL OUTPUT RULES:\n"
+        "1. Start your response directly with the first word of the scene. Never preface with \"Here is\" or \"The scene shows\"\n"
+        "2. Output ONLY the narrative text — no thinking blocks, no step explanations, no 'let me write'\n"
+        "3. Use exactly 1-2 short sentences. End with a period.\n"
+        "4. If uncertain what to write, describe sensory details (sight, sound, smell) of the immediate environment.\n"
+        "5. Reference specific locations, NPCs, or items by name when possible.\n\n"
+        "WRONG EXAMPLES (do NOT output these):\n"
+        "- \"Here is a description:\" <- meta-commentary\n"
+        "- \"I will write: ...\" <- planning text\n"
+        "- *thinks* \"...\" <- internal monologue\n\n"
+        "CORRECT EXAMPLES:\n"
+        "- \"Dust swirls in the flickering torchlight as a shadow detaches itself from the corner.\"\n"
+        "- \"The elder nods slowly, his gnarled fingers tracing worn symbols on a leather map.\""
+    )
+
     def generate_flavor_text(self, context: str, instruction: str) -> str:
         """Standard text generation for narrative output."""
         response = ollama.chat(
             model=self.model,
             messages=[
-                {"role": "system", "content": "You are a dungeon master for a dark fantasy RPG. Keep descriptions under 3 sentences."},
-                {"role": "user", "content": f"Context: {context}\nInstruction: {instruction}"}
+                {"role": "system", "content": self.FLAVOR_SYSTEM_PROMPT},
+                {"role": "user", "content": f"{context}\n\n{instruction}"}
             ]
         )
-        return response['message']['content']
+        result = response['message']['content'].strip()
+
+        # Strip any remaining meta-commentary (defense-in-depth)
+        for marker in ("Here is", "I will", "Let me", "*thinks*", "Thinking:", "Step 1", "Okay,", "Alright,"):
+            if result.lower().startswith(marker.lower()):
+                result = self._trim_meta(result)
+                break
+
+        return result or "(nothing happens)"
+
+    @staticmethod
+    def _trim_meta(text: str) -> str:
+        """Remove leading meta-commentary and return only the narrative."""
+        for sep in ("The ", "A ", "In ", "On ", "Under ", "Over ", "Through "):
+            if text.startswith(sep):
+                break
+        # Try to find first sentence-ending period that looks like actual narrative
+        parts = text.split(". ")
+        # Skip the first 1-2 segments if they look like meta-commentary (too short)
+        skip = 0
+        for i, part in enumerate(parts[:-1]):
+            if len(part.strip()) > 8:  # meta-phrases are typically short
+                break
+            skip = i + 1
+        rest = parts[skip:]
+        # Combine until we get something reasonable
+        combined = ". ".join(rest)
+        return (combined + ".").strip() or "(nothing happens)"
 
     # ------------------------------------------------------------------
     # Action-loop endpoints (Phase 4 additions)

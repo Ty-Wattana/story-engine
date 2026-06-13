@@ -198,3 +198,14 @@ class StateManager:
             # proficiency (Phase 3: natural progression)
             "proficiency": self.proficiency,
         }
+
+    def choices_snapshot(self) -> dict:
+        """Lightweight snapshot for DM choices — only location and turn.
+
+        Avoids feeding verbose inventory/stats/reputation which causes the LLM
+        to echo state text back as choice content.
+        """
+        return {
+            "location": self.world.current_location,
+            "turn": self.world.turn_count,
+        }
