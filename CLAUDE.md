@@ -9,7 +9,7 @@ This project implements a **neuro-symbolic architecture** for a D&D 5e-inspired 
 - **Symbolic Engine**: `state.py` — Python dataclasses maintain ground-truth game state (Player, WorldState, StateManager)
 - **Neural Engine**: `llm_client.py` — Ollama client acts only as interpreter and flavor-text generator; never modifies game state
 - **Validation Layer**: `schemas.py` — Pydantic schemas force structured JSON outputs from the LLM
-- **Lore Consistency**: `lore_validator.py` — validates character backstories and player input against world lore
+- **Lore Consistency**: `src/lore/` — lore validation, parser, and rules
 
 ## Core Flow (Single Turn)
 1. `advance_turn()` + snapshot (Player stats, inventory, reputation, location, turn count)
@@ -61,12 +61,10 @@ This project implements a **neuro-symbolic architecture** for a D&D 5e-inspired 
   - `OutcomeEffect` — key (entity.field.operator grammar), value
   - `ActionResult` — full dice breakdown (dice_roll, modifier, final_score, target_dc, advantage), outcome_level, success flag, engine-computed effects list, narrative_prompt
 
-- `src/lore_validator.py` — lore consistency system:
-  - `LoreParser` — parses markdown lore into LoreDatabase; also extracts categories (Setting, Factions, Magic, Technology, etc.)
-  - `LoreValidator` — LLM-based semantic validation with conflict detection, Rich negotiation UI, revision suggestion generation
-  - `_generate_revision_options()` — produces 3 concrete revised backstories resolving conflicts
-  - `_fallback_validation()` — regex/fallback checks for forbidden tech (gunpowder, steam) and magic violations (time travel, resurrection) when LLM call fails
-  - `create_validator()` — convenience function; `set_llm_client()` exposed for testing
+- `src/lore/` — lore validation package:
+  - `parser.py` — `LoreParser`, `LoreDatabase`, `LoreFact`, `LoreConstraint`, `LoreConflict`
+  - `validator.py` — `LoreValidator`, `LLMValidationError`, `create_validator()`
+  - `rules.py` — `FORBIDDEN_TECH`, `FORBIDDEN_MAGIC`, `KNOWN_FACTIONS`, `FACTION_HINTS`, `UNKNOWN_FACTION_PATTERN`
 
 ### Data & Prompts
 - `data/lore.md` / `data/lore_summary.md` — World lore: factions, magic rules, technology constraints, tone guidelines
@@ -144,5 +142,5 @@ pip install -r requirements.txt
 python main.py
 
 # Run lore validator module directly for testing
-python -c "from src.lore_validator import create_validator; v = create_validator()"
+python -c "from src.lore.validator import create_validator; v = create_validator()"
 ```

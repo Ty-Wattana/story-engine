@@ -1,66 +1,41 @@
 import json
 from pathlib import Path
 import ollama
+import re
 from pydantic import BaseModel
 from typing import Type, TypeVar
 
 from src.schemas import ActionParseResult
 
-T = TypeVar('T', bound=BaseModel)
+T = TypeVar("T", bound=BaseModel)
 
 
 class LLMClient:
-    ACTION_SYSTEM_PROMPT = """You are the action parser for a dark fantasy RPG game engine.
-Your job is to interpret player free-text input into structured game mechanics.
-Extract these fields exactly:
-- intent: 1-3 word summary of the action
-- target_entity: which NPC/item/location is being acted on (null if none)
-- is_combat: true only if hostile/physical violence
-- action_type: one of {combat, stealth, social, exploration, item}
-- verb: the dominant action verb
-- modifiers.target_stat: governing stat for this action
-- modifiers.tool_used: weapon/tool being used (null if none)
-- modifiers.advantage: 'none', 'advantage', or 'disadvantage'
-- raw_input: copy of the original player input verbatim
-
-CRITICAL RULES:
-1. Map verbs to sensible stats (sneak -> dexterity, attack -> strength, persuade -> charisma, etc.)
-2. Only mark is_combat=true if there's clear hostile intent
-3. Be precise - don't invent items or NPCs that don't exist in context
-4. If the input mentions a specific stat to use, extract it as target_stat
-5. DO NOT predict state changes (inventory, reputation). Those are computed by the game engine from deterministic rules based on the outcome of the action roll.
-6. Keep raw_input exactly as typed (preserve quotes, capitalization)
-
-Respond ONLY with valid JSON no markdown fences."""
-
-    CHOICE_SYSTEM_PROMPT = """You are a Dungeon Master assistant for a dark fantasy RPG.
-Given the current game state and situation, generate up to 6 in-world action options
-that a player might take. Each option must feel natural and appropriate to the scene.
-
-Rules:
-1. Options should be varied (combat, stealth, social, exploration) when possible
-2. Keep each option to one short sentence (max 20 words)
-3. Reference current NPCs, items, and locations by name
-4. Don't suggest actions that are impossible given the lore/context
-5. Include at least one creative/unexpected but logical option
-
-CRITICAL: DO NOT copy any text from game_state into your options. Never repeat descriptions, inventory lists, or narrative prose. Write original action verbs only (e.g., "Sneak past the guards", "Ask the elder about rumors"). The game state is context for generating ideas — not content to echo back.
-
-Respond with ONLY a JSON array of strings - no markdown fences."""
-
     def __init__(self, model_name: str = "qwen3.5:64k"):
         self.model = model_name
 
     # ------------------------------------------------------------------
-    # Character creation (unchanged from original)
+    # Prompt loading (reads from src/prompts/*.md)
     # ------------------------------------------------------------------
 
     def _load_system_prompt(self, prompt_file: str = "prompts/character_creation.md") -> str:
-        """Load the system prompt from a markdown file."""
-        path = Path(__file__).parent.parent / prompt_file
+        """Load a system prompt from the prompts/ directory."""
+        path = Path(__file__).parent / prompt_file
         if not path.exists():
-            return "Extract the character's core details: origin_faction, motivation (one word), and goal."
+            return ""
         return path.read_text(encoding="utf-8").strip()
+
+    @property
+    def action_prompt(self) -> str:
+        return self._load_system_prompt("prompts/action.md")
+
+    @property
+    def choice_prompt(self) -> str:
+        return self._load_system_prompt("prompts/choices.md")
+
+    # ------------------------------------------------------------------
+    # Structured generation (Pydantic-validated JSON)
+    # ------------------------------------------------------------------
 
     def generate_structured(self, system_prompt: str, user_prompt: str, schema: Type[T]) -> T:
         """Forces the LLM to return JSON matching the Pydantic schema."""
@@ -151,17 +126,12 @@ Respond with ONLY a JSON array of strings - no markdown fences."""
             Validated ActionParseResult via Pydantic schema enforcement.
         """
         context_block = json.dumps(state_context, indent=2)
-
-        prompt = (
-            f"Current game state:\n{context_block}\n\n"
-            f"Player input: \"{user_input}\"\n\n"
-            "Parse this action into structured mechanics."
-        )
+        prompt = f"Current game state:\n{context_block}\n\nPlayer input: {user_input!r}\n\nParse this action into structured mechanics."
 
         return self.generate_structured(
-            system_prompt=self.ACTION_SYSTEM_PROMPT,
+            system_prompt=self.action_prompt,
             user_prompt=prompt,
-            schema=ActionParseResult
+            schema=ActionParseResult,
         )
 
     def generate_choices(self, state_context: dict) -> list[str]:
@@ -171,20 +141,18 @@ Respond with ONLY a JSON array of strings - no markdown fences."""
         Falls back to an empty list on error so the loop never dies.
         """
         context_block = json.dumps(state_context, indent=2)
-
         response = ollama.chat(
             model=self.model,
             messages=[
-                {"role": "system", "content": self.CHOICE_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Game state:\n{context_block}\n\nGenerate action options."}
-            ]
+                {"role": "system", "content": self.choice_prompt},
+                {"role": "user", "content": f"Game state:\n{context_block}\n\nGenerate action options."},
+            ],
         )
 
-        text = response['message']['content'].strip()
+        text = response["message"]["content"].strip()
 
         # Try markdown fences first
-        import re
-        m = re.search(r'```(?:json)?\s*([\[\s\S]*?)\s*```', text)
+        m = re.search(r"```(?:json)?\s*([\[\s\S]*?)\s*```", text)
         if m:
             text = m.group(1)
 
@@ -198,7 +166,7 @@ Respond with ONLY a JSON array of strings - no markdown fences."""
         # Last-resort: split by bullets or numbered lines
         fallback = []
         for line in text.splitlines():
-            stripped = line.strip().lstrip('-•*0123456789.). ').strip()
+            stripped = line.strip().lstrip("-•*0123456789.). ").strip()
             if 10 < len(stripped) < 100:
                 fallback.append(stripped)
         return fallback[:6] if fallback else []
