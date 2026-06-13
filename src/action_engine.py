@@ -129,6 +129,7 @@ def evaluate_outcome(
 def resolve_action(
     action_type: str,
     stat_name: str | None = None,
+    stat_value: int = 10,            # the actual ability score (default 10 => +0)
     tool_modifier: int = 0,
     advantage: Literal["none", "advantage", "disadvantage"] = "none",
     proficiency: int = 2,
@@ -153,12 +154,8 @@ def resolve_action(
     raw_roll, pre_score = DiceSystem.roll_attack(advantage)
 
     # Total modifier chain: stat_bonus + proficiency + tool
-    modifier = 0
-    if stat_name:
-        # Placeholder for now — caller passes stat value directly
-        pass
-    modifier += proficiency
-    modifier += tool_modifier
+    stat_bonus = (stat_value - 10) // 2   # D&D ability modifier formula
+    modifier = stat_bonus + proficiency + tool_modifier
 
     final_score = pre_score + modifier
 
@@ -168,7 +165,7 @@ def resolve_action(
         "dice_roll":      raw_roll,
         "pre_score":      pre_score,
         "modifier":       modifier,
-        "stat_bonus":     0,          # caller provides stat via action_type mapping
+        "stat_bonus":     stat_bonus,
         "proficiency":    proficiency,
         "tool_modifier":  tool_modifier,
         "advantage":      advantage,

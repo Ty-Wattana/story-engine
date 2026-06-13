@@ -26,10 +26,25 @@ console = Console()
 def _build_stats_table(state_mgr: StateManager) -> Table:
     s = state_mgr.player.stats
     t = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
+
+    # Temporary stat bonuses/penalties from crit effects and failure penalties
+    temp_bonuses = {
+        "strength": getattr(s, "_str_bonus", 0),
+        "dexterity": getattr(s, "_dex_bonus", 0),
+        "intelligence": getattr(s, "_int_bonus", 0),
+        "wisdom": getattr(s, "_wisdom_bonus", 0),
+        "constitution": getattr(s, "_con_penalty", 0),
+        "charisma": getattr(s, "_cha_bonus", 0),
+    }
+
     for name in ("strength", "dexterity", "intelligence", "wisdom", "constitution", "charisma"):
         val = getattr(s, name)
-        bonus = s.bonus(name)
-        t.add_row(f"[bold green]{name.capitalize():>10}[/] ", f"  {val:>3}  ({bonus:+d})")
+        bonus = s.bonus(name) + temp_bonuses[name]   # effective bonus including temporary boosts
+        display_val = f"  {val:>3}  ({bonus:+d})"
+        if temp_bonuses[name]:
+            sign = "+" if temp_bonuses[name] > 0 else ""
+            display_val += f" [dim]{sign}{temp_bonuses[name]}[/dim]"
+        t.add_row(f"[bold green]{name.capitalize():>10}[/] ", display_val)
     return t
 
 
@@ -268,7 +283,7 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
       1. advance_turn() + snapshot (once)
       2. LLM choices (if state changed or first time)
       3. Parse input via LLM -> ActionParseResult
-      4. resolve_action() with advantage/proficiency
+      4. resolve_action() with advantage/proficiency + actual stat score
       5. apply_engine_effects(outcome_level, action_type) — for ALL outcomes
       6. generate_flavor_text() — for ALL outcomes
       7. display outcome panel + compact summary
@@ -281,6 +296,9 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
 
     # First status dump so player sees what they have on turn 1
     _show_status(state_mgr)
+
+    # Debounce: skip identical consecutive inputs immediately (no LLM cost).
+    last_input: str | None = None
 
     while True:
         world.advance_turn()
@@ -299,21 +317,29 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
             _show_dm_choices(choices_list)
             console.print("[yellow]Type the number to select, or type your own action.[/]")
 
-        user_input = console.input("\n[bold green]>[/bold green] ").strip()
+        user_input_raw = console.input("\n[bold green]>[/bold green] ").strip()
 
-        if user_input.lower() in ("quit", "q", "exit"):
+        if user_input_raw.lower() in ("quit", "q", "exit"):
             console.print("\n[yellow]Goodbye![/yellow]")
             break
 
+        # Debounce: skip duplicate inputs instantly (fixes slow processing)
+        if user_input_raw == last_input:
+            console.print("[dim](duplicate — skipped. The previous turn already resolved this input.)[/dim]")
+            _show_status(state_mgr)
+            continue
+        last_input = user_input_raw
+
         # If they typed a number and choices were shown, treat that as the chosen option
-        parsed_input = user_input
-        if choices_list and user_input.isdigit():
-            idx = int(user_input) - 1
+        parsed_input = user_input_raw
+        if choices_list and user_input_raw.isdigit():
+            idx = int(user_input_raw) - 1
             if 0 <= idx < len(choices_list):
                 parsed_input = choices_list[idx]
 
         # --- Parse action ---
         try:
+            console.print("[dim][parsing your action…][/dim]")
             action_result_raw = llm.generate_action_result(parsed_input, snapshot)
         except Exception as e:
             console.print(f"\n[red]Action parse failed: {e}[/red]")
@@ -325,10 +351,18 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
         adv = getattr(action_result_raw.modifiers, "advantage", "none") or "none"
         tool_used = getattr(action_result_raw.modifiers, "tool_used", None)
 
+        # Look up the actual stat score from PlayerStats (fixes issue: stat_bonus always 0).
+        if stat_name:
+            raw_stat_score = player.stats.__dict__.get(stat_name.lower(), 10)
+        else:
+            raw_stat_score = 10
+        console.print(f"[dim][rolling dice…][/dim]")
+
         resolve_output = resolve_action(
             action_type=action_result_raw.action_type,
             stat_name=stat_name,
-            tool_modifier=1 if tool_used else 0,       # placeholder: real tool bonus from lookup
+            stat_value=raw_stat_score,        # pass the actual ability score (was silently ignored)
+            tool_modifier=1 if tool_used else 0,
             advantage=adv,
             proficiency=state_mgr.proficiency,
             world_context=snapshot.get("location", ""),
@@ -337,6 +371,14 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
         # Always apply engine effects — for ALL outcomes (success / partial / failure)
         effects_applied = state_mgr.apply_outcome_effects(resolve_output["outcome_level"], action_result_raw.action_type)
         effect_display = [f"{k} → {v}" for k, v in effects_applied.items()] if effects_applied else ["(no mechanical change this turn)"]
+
+        # Check reputation thresholds — unlock new content when reached
+        new_unlocks = state_mgr.player.check_rep_thresholds()
+        unlock_display: list[str] = []
+        if new_unlocks:
+            for unlock in new_unlocks:
+                label = unlock.replace("_", " ").title()
+                unlock_display.append(f"[magenta]🔓 {label}[/magenta]")
 
         # Always generate flavor text — for ALL outcomes. Use rich dynamic state so the LLM
         # never recycles the same prose (it gets fresh facts to work with each turn).
@@ -352,6 +394,7 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
                 f"Outcome: {resolve_output['outcome_level']}\n"
                 f"Turn: {world.turn_count}"
             )
+            console.print("[dim][generating narrative…][/dim]")
             narrative = llm.generate_flavor_text(
                 context=flavor_context,
                 instruction=f"DM narrates the outcome of this action in 1-2 sentences. Ground it in what just happened — reference specific items, NPCs, or locations that changed."
@@ -364,6 +407,12 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
         resolve_output["turn"] = world.turn_count
         resolve_output["advantage"] = adv
         _display_outcome(resolve_output, effect_display, narrative)
+
+        # Show reputation unlocks separately (not part of effects list)
+        if unlock_display:
+            console.print("\n[yellow]═══ Thresholds Reached ═══[/yellow]")
+            for u in unlock_display:
+                console.print(f"  {u}")
 
         # Refresh status for next turn
         _show_status(state_mgr)

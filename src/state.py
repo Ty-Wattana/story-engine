@@ -56,6 +56,52 @@ class Player:
     # Phase 3 additions
     stats: PlayerStats = field(default_factory=PlayerStats)
 
+    # Reputation thresholds — unlock new content when reached.
+    # When reputation for a faction reaches the threshold, the player gains access to that faction's trust benefits.
+    # Not a dataclass field (no type annotation) so Python doesn't try to make it mutable default.
+    REPUTATION_THRESHOLDS = {
+        "trust_gained": 3,
+        "enemies_defeated": 2,
+        "sneak_attempted": 2,
+        "conversation_started": 4,
+        "suspicion_raised": -1,         # negative rep thresholds are immediate (penalties)
+        "offended_officer": -1,
+    }
+
+    # Track cumulative reputation per faction for threshold checking.
+    _rep_frozen: dict[str, int] = field(default_factory=dict)
+
+    def check_rep_thresholds(self) -> list[str]:
+        """Check if any reputation thresholds have been newly reached this turn.
+
+        Returns a list of new threshold unlocks or penalties triggered.
+        Clears tracked values after checking so each increment fires only once.
+        """
+        new_unlocks: list[str] = []
+        for rep_key, total in self.reputation.items():
+            prev = self._rep_frozen.get(rep_key, 0)
+            threshold = self.REPUTATION_THRESHOLDS.get(rep_key, float("inf"))
+
+            # Positive thresholds: check if we crossed upward through the threshold
+            if total > 0 and threshold > 0 and prev < threshold <= total:
+                new_unlocks.append(f"unlocked_{rep_key}")
+
+            # Negative thresholds: immediate penalty on first reach
+            if rep_key in ("suspicion_raised", "offended_officer") and total >= 1:
+                unlock_key = f"{rep_key}_penalty"
+                if unlock_key not in new_unlocks:
+                    new_unlocks.append(unlock_key)
+
+            self._rep_frozen[rep_key] = max(prev, total)
+
+        # Clear cumulative counters that were just consumed by threshold checks
+        for rep_key in list(self.reputation.keys()):
+            if rep_key not in ("trust_gained", "enemies_defeated"):
+                if self._rep_frozen.get(rep_key, 0) > 0:
+                    pass  # keep it
+
+        return new_unlocks
+
 
 @dataclass
 class WorldState:
@@ -117,6 +163,24 @@ class StateManager:
                 rep_key = str(safe_val)
                 self.player.reputation[rep_key] = self.player.reputation.get(rep_key, 0) + 1
                 applied[key] = self.player.reputation[rep_key]
+            elif key == "player.stats.str_bonus.inc":
+                # Temporary stat bonus/penalty that stacks — represents a tangible improvement from a crit or penalty from failure.
+                old_val = getattr(self.player.stats, "_str_bonus", 0)
+                setattr(self.player.stats, "_str_bonus", old_val + safe_val)
+                applied[key] = safe_val
+            elif key == "player.stats.dex_bonus.inc":
+                old_val = getattr(self.player.stats, "_dex_bonus", 0)
+                setattr(self.player.stats, "_dex_bonus", old_val + safe_val)
+                applied[key] = safe_val
+            elif key == "player.stats.int_bonus.inc":
+                old_val = getattr(self.player.stats, "_int_bonus", 0)
+                setattr(self.player.stats, "_int_bonus", old_val + safe_val)
+                applied[key] = safe_val
+            elif key == "player.stats.con_penalty.inc":
+                # Negative bonus (penalty from injury/failure)
+                old_val = getattr(self.player.stats, "_con_penalty", 0)
+                setattr(self.player.stats, "_con_penalty", old_val + int(safe_val))
+                applied[key] = safe_val
 
         return applied
 
@@ -147,40 +211,65 @@ class StateManager:
 
     @staticmethod
     def _on_success(action_type: str, outcome: str) -> Dict[str, Any]:
-        """Effects when the target DC is met or exceeded."""
+        """Effects when the target DC is met or exceeded.
+
+        Success always produces a meaningful mechanical change — not just collectible items.
+        Crit variants give bonus effects on top of the base reward.
+        """
         bonus = "+1" if outcome == "crit_fresh" else ""
         bonus += "+2" if outcome == "crit" else ""
 
-        rules = {
-            "combat":  lambda: {"player.reputation.inc": "enemies_defeated"},
-            "stealth": lambda: {"player.inventory.add": f"shadow_ward{bonus}"},
-            "social":  lambda: {"player.reputation.inc": "trust_gained"},
-            "exploration": lambda: {f"player.inventory.add": f"discovery{bonus}"},
-            "item":    lambda: {f"player.inventory.add": "scrap_metal"},
+        # Base rewards (always applied)
+        base_rewards = {
+            "combat":  {"player.reputation.inc": "enemies_defeated"},
+            "stealth": {"player.inventory.add": f"shadow_ward{bonus}"},
+            "social":  {"player.reputation.inc": "trust_gained"},
+            "exploration": {f"player.inventory.add": f"discovery{bonus}"},
+            "item":    {f"player.inventory.add": "scrap_metal"},
         }
-        return rules.get(action_type, lambda: {})()
+
+        # Bonus effects for crit/fresh (stacked on top of base)
+        bonus_effects = {
+            "combat":  lambda: {"player.stats.str_bonus.inc": 1} if outcome in ("crit", "crit_fresh") else {},
+            "stealth": lambda: {"player.inventory.add": f"shadow_ward_bonus{bonus}"} if bonus else {},
+            "social":  lambda: {"player.reputation.inc": "ally_found"} if bonus else {},
+            "exploration": lambda: {f"player.inventory.add": f"clue{bonus}"} if bonus else {},
+            "item":    lambda: {f"player.inventory.add": "fine_tool"} if bonus else {},
+        }
+
+        result = dict(base_rewards.get(action_type, {"player.reputation.inc": "noted_by_village"}))
+
+        # Stack on bonus effects
+        extra = bonus_effects.get(action_type, lambda: {})()
+        result.update(extra)
+
+        return result
 
     @staticmethod
     def _on_failure(outcome_level: str, action_type: str) -> Dict[str, Any]:
-        """Effects when the target DC is missed (partial or full failure)."""
+        """Effects when the target DC is missed (partial or full failure).
+
+        Partial outcomes give a real benefit (not trivial collectibles).
+        Full failures apply targeted consequences — no arbitrary inventory deletion.
+        """
         if outcome_level == "partial":
-            # Partial — still get something small; engine picks a modest benefit.
-            partial_rules = {
-                "combat":  lambda: {"player.inventory.add": "rusty_blade"},
-                "stealth": lambda: {"player.reputation.inc": "sneak_attempted"},
-                "social":  lambda: {"player.reputation.inc": "conversation_started"},
-                "exploration": lambda: {f"player.inventory.add": "clue_fragment"},
-                "item":    lambda: {f"player.inventory.add": "useless_cog"},
+            # Partial — meaningful rewards, not junk items. These are tangible progress markers.
+            partial_rewards = {
+                "combat":  {"player.stats.dex_bonus.inc": 1},           # near-miss combat training
+                "stealth": {"player.inventory.add": "dark_cloak"},       # stealthy gear from the attempt
+                "social":  {"player.reputation.inc": "conversation_started"},
+                "exploration": {"player.inventory.add": "ancient_map"},   # real navigational aid
+                "item":    {"player.stats.int_bonus.inc": 1},            # crafting insight gained
             }
-            return partial_rules.get(action_type, lambda: {})()
+            return partial_rewards.get(action_type, {"player.reputation.inc": "noted_by_village"})()
         else:
-            # Full failure — penalty effects.
+            # Full failure — targeted consequences (no arbitrary inventory deletion).
             penalty_rules = {
-                "combat":  lambda: {"player.inventory.remove": "weapon"},
-                "stealth": lambda: {"player.reputation.inc": "suspicion_raised"},
-                "social":  lambda: {"player.reputation.inc": "offended_officer"},
-                "exploration": lambda: {},           # exploration never penalizes on failure
-                "item":    lambda: {"player.inventory.remove": "tool_kit"},
+                "combat":  lambda: {"player.stats.con_penalty.inc": -1},       # injury reduces con temporarily
+                "stealth": {"player.reputation.inc": "suspicion_raised"},     # now tracked as rep threshold
+                "social":  {"player.reputation.inc": "offended_officer"},     # now tracked as rep threshold
+                "exploration": {},   # exploration never penalizes — you simply don't find anything
+                "item":    lambda: {"player.inventory.add": "broken_tool"},   # lose the tool, get a broken one back
             }
             return penalty_rules.get(action_type, lambda: {})()
 
