@@ -30,7 +30,7 @@ def _show_player_stats(state_mgr: StateManager) -> None:
 
     rows = [
         f"[cyan]Str:[/cyan] {s.strength:+3} ({s.bonus('strength'):+d})",
-        f"[cyan]Dex:[/cyan] {s.dexterity:+3} ({s.bonus('dex'):+d})",
+        f"[cyan]Dex:[/cyan] {s.dexterity:+3} ({s.bonus('dexterity'):+d})",
         f"[cyan]Int:[/cyan] {s.intelligence:+3} ({s.bonus('intelligence'):+d})",
         f"[cyan]Wis:[/cyan] {s.wisdom:+3} ({s.bonus('wisdom'):+d})",
         f"[cyan]Con:[/cyan] {s.constitution:+3} ({s.bonus('constitution'):+d})",
@@ -271,7 +271,7 @@ def _show_dm_choices(options: list[str]) -> int | None:
         return None
     t = Table(box=box.SIMPLE, title="[bold yellow]Available Actions[/bold yellow]", show_header=False)
     for i, opt in enumerate(options, 1):
-        t.add_row(f"[bold cyan]{i}:[/cyan]", opt)
+        t.add_row(f"[bold cyan]{i}:[][dim]•[/dim]", opt)
     console.print(Panel(t, border_style="yellow", expand=True))
     return None  # Let the caller handle input
 
@@ -344,7 +344,7 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
 
         if not resolve_output["success"]:
             console.print("\n[yellow]Action failed. Your attempt does not succeed.[/yellow]")
-            _show_player_status(state_mgr)  # refresh for feedback
+            _show_status(state_mgr)  # refresh for feedback
             continue
 
         # --- Apply mechanical effects to state ---
