@@ -3,7 +3,7 @@ from pathlib import Path
 import ollama
 import re
 from pydantic import BaseModel
-from typing import Type, TypeVar
+from typing import Type, TypeVar, Any
 
 from src.schemas import ActionParseResult
 
@@ -37,20 +37,55 @@ class LLMClient:
     # Structured generation (Pydantic-validated JSON)
     # ------------------------------------------------------------------
 
-    def generate_structured(self, system_prompt: str, user_prompt: str, schema: Type[T]) -> T:
-        """Forces the LLM to return JSON matching the Pydantic schema."""
+    def generate_structured(self, system_prompt: str, user_prompt: str, schema: Type[T], *, retries: int = 3) -> T:
+        """Forces the LLM to return JSON matching the Pydantic schema.
 
-        response = ollama.chat(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            format=schema.model_json_schema()
-        )
+        Handles common LLM quirks (markdown fences, conversational text) by
+        extracting embedded JSON and retrying on validation failure.
+        """
+        last_exc: Exception | None = None
 
-        raw_json = response['message']['content']
-        return schema.model_validate_json(raw_json)
+        for attempt in range(retries):
+            response = ollama.chat(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                format="json"
+            )
+
+            text = response['message']['content']
+
+            # 1. Strip markdown fences (````json` or ```) if present
+            cleaned = self._extract_json_text(text)
+            if cleaned is not None:
+                parsed = schema.model_validate_json(cleaned)
+                if self._looks_valid(parsed, schema):
+                    return parsed
+
+            # 2. Try the raw text as-is (LLM sometimes returns bare JSON)
+            try:
+                parsed = schema.model_validate_json(text.strip())
+                if self._looks_valid(parsed, schema):
+                    return parsed
+            except Exception as raw_exc:
+                last_exc = raw_exc
+                continue
+
+            # 3. Try to find and extract a JSON object from the text
+            extracted = self._extract_json_from_text(text)
+            if extracted is not None:
+                try:
+                    parsed = schema.model_validate_json(extracted)
+                    if self._looks_valid(parsed, schema):
+                        return parsed
+                except Exception:
+                    last_exc = raw_exc if 'raw_exc' in locals() else last_exc
+                    continue
+
+        # All retries exhausted — LLM didn't produce valid extraction.
+        raise ValueError("LLM returned no parseable JSON after 3 attempts")
 
     FLAVOR_SYSTEM_PROMPT = (
         "You are a dungeon master narrator for a dark fantasy RPG.\n"
@@ -88,6 +123,86 @@ class LLMClient:
                 break
 
         return result or "(nothing happens)"
+
+    # ------------------------------------------------------------------
+    # JSON extraction helpers — handle LLM quirks with markdown fences,
+    # conversational text, and embedded objects
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_json_text(text: str) -> str | None:
+        """Strip ```json or ``` fences from the edges of a response.
+
+        Returns the cleaned interior if fences are found, else None.
+        """
+        m = re.search(r'```(?:json)?\s*([\[\s\S]*?)\s*```', text)
+        if m:
+            return m.group(1).strip()
+        return None
+
+    @staticmethod
+    def _extract_json_from_text(text: str) -> str | None:
+        """Find and extract a JSON object from arbitrary text.
+
+        Looks for the first '{' … matching '}' pair, handling nesting.
+        Returns the extracted JSON string if found, else None.
+        """
+        depth = 0
+        start = None
+        for i, ch in enumerate(text):
+            if ch == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0 and start is not None:
+                    return text[start:i + 1]
+        return None
+
+    @staticmethod
+    def _looks_valid(parsed: Any, schema: Type[BaseModel]) -> bool:
+        """Heuristic check that a Pydantic parse succeeded with sensible fields.
+
+        Rejects results where required string fields are empty or contain
+        likely-incorrect defaults (e.g., "assistant" when the model confused
+        itself for the AI character).
+        """
+        # If already a Pydantic model, just check its attributes directly
+        if isinstance(parsed, BaseModel):
+            obj = parsed
+        else:
+            try:
+                obj = schema.model_validate(parsed)
+            except Exception:
+                return False
+
+        vals: dict[str, str] = {}
+        for field_name, field_info in schema.model_fields.items():
+            value = obj.__dict__.get(field_name)
+            if isinstance(value, str):
+                stripped = value.strip()
+                # Reject empty or whitespace-only fields
+                if not stripped:
+                    return False
+                vals[field_name] = stripped
+                # Common hallucination patterns — model confuses itself for the AI character
+                ai_defaults = {"assistant", "ai", "llm", "model", "chatbot", "bot", "system"}
+                if field_name in ("origin_faction",) and stripped.lower() in ai_defaults:
+                    return False
+            else:
+                vals[field_name] = ""
+
+        # Known extraction defaults — the model may echo these from its prompt examples.
+        # Reject only when ALL three fields are known extraction defaults simultaneously,
+        # indicating the model didn't actually extract from the input.
+        _EXTRACTION_DEFAULTS = {"Wanderer", "Discovery", "Forge your own path"}
+        if vals.get("origin_faction") in _EXTRACTION_DEFAULTS and \
+           vals.get("motivation") in _EXTRACTION_DEFAULTS and \
+           vals.get("goal") in _EXTRACTION_DEFAULTS:
+            return False
+
+        return True
 
     @staticmethod
     def _trim_meta(text: str) -> str:

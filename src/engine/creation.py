@@ -25,13 +25,25 @@ def initialize_game(llm: LLMClient) -> Player | None:
     console.print("\n[yellow]=== System Prompt Preview ===[/yellow]")
     console.print(system_prompt[:500] + "[\n\n", markup=False)
 
+    profile: CharacterProfile | None = None
+    use_fallback = False
+
     try:
         with console.status("[yellow]Parsing background with local LLM...[/yellow]"):
             profile = llm.generate_structured(system_prompt, backstory, CharacterProfile)
     except Exception as e:
         console.print(f"\n[red]Error parsing your backstory: {e}[/red]")
-        console.print("[yellow]Please try with a clearer backstory or check your network.[/yellow]")
-        return None
+        console.print("[yellow]Trying keyword extraction fallback...[/yellow]")
+
+        fallback = _extract_fallback_profile(backstory)
+        if fallback:
+            profile = fallback
+            use_fallback = True
+        else:
+            console.print("[yellow]No fallback available. Please try a different backstory.[/yellow]")
+            return None
+
+    current_profile = profile  # Either from LLM or keyword fallback
 
     # === Lore Validation ===
     console.print("\n[yellow]=== Validating against lore database ===[/yellow]")
@@ -43,7 +55,6 @@ def initialize_game(llm: LLMClient) -> Player | None:
     is_valid = result.is_valid
     conflicts = result.conflicts
     suggestions = result.suggestions
-    current_profile = profile
     current_backstory = backstory
 
     if not is_valid:
@@ -167,3 +178,101 @@ def initialize_game(llm: LLMClient) -> Player | None:
     console.print(f"[italic]Goal:[/italic] [bold cyan]{player.goal}[/bold cyan]")
 
     return player
+
+
+def _extract_fallback_profile(backstory: str) -> CharacterProfile | None:
+    """Extract character profile from backstory using keyword heuristics.
+
+    Used as a fallback when the LLM fails to produce valid structured output.
+    Returns a reasonable default if keywords match, else None.
+    """
+    text = backstory.lower()
+
+    # Faction detection
+    factions = {
+        "mercenary": "Independent Mercenary",
+        "soldier": "Veteran Soldier",
+        "knight": "Fallen Knight",
+        "ranger": "Woods Ranger",
+        "wizard": "Arcane Scholar",
+        "mage": "Arcane Mage",
+        "rogue": "Shadow Rogue",
+        "thief": "Street Thief",
+        "merchant": "Desert Caravan Merchant",
+        "healer": "Temple Healer",
+        "cleric": "Temple Cleric",
+        "paladin": "Holy Paladin",
+        "barbarian": "Wild Barbarian",
+        "monk": "Wandering Monk",
+        "druid": "Forest Druid",
+        "assassin": "Shadow Assassin",
+        "guard": "Village Guard",
+        "noble": "Disgraced Noble",
+        "wizard|mage|sorcerer": "Arcane Scholar",
+    }
+    faction = "Wanderer"
+    for pattern, name in factions.items():
+        if any(w in text for w in pattern.split("|")):
+            faction = name
+            break
+
+    # Motivation detection
+    motivations = {
+        "rescue|save|find": "Rescue",
+        "revenge|vengeance|kill|slay": "Vengeance",
+        "wealth|fortune|gold|riches": "Wealth",
+        "power|conquer|rule": "Power",
+        "knowledge|lore|study|learn": "Knowledge",
+        "redemption|atonement|penance|sin": "Redemption",
+        "glory|honor|fame": "Glory",
+        "freedom|escape|flee": "Freedom",
+        "justice|truth|protect|defend": "Justice",
+        "love|loyalty| devotion": "Loyalty",
+    }
+    motivation = "Discovery"
+    for pattern, tag in motivations.items():
+        if any(w in text for w in pattern.split("|")):
+            motivation = tag
+            break
+
+    # Goal detection - build from key verbs/nouns
+    goal_words = []
+    goal_patterns = {
+        "rescue|save": "rescue",
+        "revenge|vengeance": "avenge",
+        "kill|slay|destroy": "destroy",
+        "find|search": "find",
+        "learn|study|discover": "discover",
+        "conquer|rule": "conquer",
+        "protect|defend": "defend",
+        "seek|pursue": "pursue",
+    }
+    for pattern, verb in goal_patterns.items():
+        if any(w in text for w in pattern.split("|")):
+            goal_words.append(verb)
+            break
+
+    # Extract key nouns (simplified: look for capitalized-like or specific nouns)
+    noun_indicators = {
+        "village": "the village",
+        "kingdom": "the kingdom",
+        "friend|companion|ally": "an ally",
+        "artifact|relic|artefact": "a lost relic",
+        "fortress|castle|tower": "the enemy stronghold",
+    }
+    for pattern, noun in noun_indicators.items():
+        if any(w in text for w in pattern.split("|")):
+            goal_words.append(noun)
+            break
+
+    if not goal_words:
+        goal = f"Forge a new destiny among {faction.lower()}"
+    else:
+        obj = goal_words[1] if len(goal_words) > 1 else "the target"
+        goal = f"{goal_words[0].title()} {obj}".rstrip()
+
+    return CharacterProfile(
+        origin_faction=faction,
+        motivation=motivation,
+        goal=goal,
+    )
