@@ -19,8 +19,10 @@ class LLMClient:
     # ------------------------------------------------------------------
 
     def _load_system_prompt(self, prompt_file: str = "prompts/character_creation.md") -> str:
-        """Load a system prompt from the prompts/ directory."""
-        path = Path(__file__).parent / prompt_file
+        """Load a system prompt from the prompts/ directory (repo root)."""
+        # prompts/ is at repo root; llm_client.py lives under src/, so go up one level
+        base = Path(__file__).resolve().parent.parent
+        path = base / prompt_file
         if not path.exists():
             return ""
         return path.read_text(encoding="utf-8").strip()
