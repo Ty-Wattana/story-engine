@@ -261,7 +261,7 @@ class StateManager:
                 "exploration": {"player.inventory.add": "ancient_map"},   # real navigational aid
                 "item":    {"player.stats.int_bonus.inc": 1},            # crafting insight gained
             }
-            return partial_rewards.get(action_type, {"player.reputation.inc": "noted_by_village"})()
+            return partial_rewards.get(action_type, {"player.reputation.inc": "noted_by_village"})
         else:
             # Full failure — targeted consequences (no arbitrary inventory deletion).
             penalty_rules = {
