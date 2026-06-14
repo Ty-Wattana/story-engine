@@ -1,7 +1,6 @@
 """Game loop — main turn cycle, action resolution, and outcome rendering."""
 
 import sys
-from dataclasses import dataclass
 
 from rich.console import Console
 from rich.panel import Panel
@@ -17,6 +16,7 @@ from src.action_engine import resolve_action
 
 from src.ui.status import show_status
 from src.ui.output import display_outcome, show_dm_choices
+from src.narrative import generate_scene_description, StoryMemory, StoryEvent
 
 console = Console()
 
@@ -33,12 +33,47 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
     show_status(state_mgr)
 
     last_input: str | None = None
+    memory = StoryMemory()
 
     while True:
         world.advance_turn()
 
         # --- Snapshot ONCE this turn ---
         snapshot = state_mgr.snapshot()
+
+        # --- Opening scene description (DM sets the stage before offering choices) ---
+        loc = snapshot.get("location", "Unknown")
+        if world.turn_count == 1:
+            # Turn 1 — fresh introductory scene for a new character
+            intro_context = (
+                "You are the dungeon master narrator for a dark fantasy RPG.\n"
+                "Write an atmospheric introductory paragraph (5-10 sentences) for a player\n"
+                "entering this location for the first time. Include sensory details and end\n"
+                "with a hook or tension point suggesting what might happen next.\n"
+                "Do NOT offer choices or ask what the player does — just set the scene."
+                f"\n\nLocation: [{loc}]\nFirst turn — introduce the setting. Describe the place, the mood, and any notable features. Make it feel alive and immersive."
+            )
+            try:
+                console.print("[dim][generating intro…][/dim]")
+                narrative = llm.generate_flavor_text(intro_context,
+                    instruction="DM introduces the starting location in 2-3 atmospheric sentences. End with a hook.")
+                if narrative:
+                    console.print(f"\n[dim]{narrative}[/dim]")
+            except Exception as e:
+                console.print(f"[dim][intro skipped] {e}[/dim]")
+        else:
+            # Post-turn scene — set the stage for what comes next
+            recent = memory.get_recent(5)  # last 5 events for context
+            recent_events = [StoryEvent(**e) if isinstance(e, dict) else e for e in recent]
+            try:
+                def scene_prompt_fn(ctx_str: str) -> str:
+                    return llm.generate_flavor_text(context=ctx_str, instruction="DM sets the scene in 2-3 atmospheric sentences. Ground it in what just happened and end with a hint of what might come next.")
+                narrative = generate_scene_description(loc, recent_events, scene_prompt_fn)
+            except Exception as e:
+                console.print(f"[dim][scene generation skipped] {e}[/dim]")
+                narrative = None
+            if narrative:
+                console.print(f"\n[dim]{narrative}[/dim]")
 
         # --- DM choices ---
         try:
@@ -144,6 +179,21 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
             console.print("\n[yellow]═══ Thresholds Reached ═══[/yellow]")
             for u in unlock_display:
                 console.print(f"  {u}")
+
+        # Record event for next turn's scene description
+        memory.add_event(StoryEvent(
+            turn=world.turn_count,
+            player_name=player.name,
+            intent=action_result_raw.intent,
+            action_type=action_result_raw.action_type,
+            target_entity=action_result_raw.target_entity,
+            dice_roll=resolve_output["dice_roll"],
+            final_score=resolve_output["final_score"],
+            target_dc=resolve_output["target_dc"],
+            success=resolve_output.get("success", False),
+            outcome_level=resolve_output["outcome_level"],
+            narrative_summary=action_result_raw.intent,
+        ))
 
         show_status(state_mgr)
 
