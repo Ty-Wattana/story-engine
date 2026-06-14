@@ -280,10 +280,24 @@ class LLMClient:
         except (json.JSONDecodeError, ValueError):
             pass
 
-        # Last-resort: split by bullets or numbered lines
+        # Last-resort: split by bullets or numbered lines, skipping markdown noise
         fallback = []
         for line in text.splitlines():
-            stripped = line.strip().lstrip("-•*0123456789.). ").strip()
-            if 10 < len(stripped) < 100:
-                fallback.append(stripped)
+            stripped = line.strip()
+
+            # Skip empty, too short, or overly long lines
+            if not stripped or len(stripped) > 120:
+                continue
+
+            # Skip markdown headers, horizontal rules, and pipe-delimited rows
+            if re.match(r"^#{1,6}\s|^[-*_]{3,}$|^\|", stripped):
+                continue
+
+            # Strip leading bullets/numbers then remove structural chars (pipes, bold markers)
+            core = re.sub(r"^\d+\.\s*", "", stripped)
+            core = re.sub(r"^[-•*]+\s*", "", core).strip()
+            core = re.sub(r"[|`_*]", "", core).strip()
+
+            if 10 < len(core) < 120:
+                fallback.append(core)
         return fallback[:6] if fallback else []
