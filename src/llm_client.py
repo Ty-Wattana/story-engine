@@ -15,7 +15,7 @@ class LLMClient:
         self.model = model_name
 
     # ------------------------------------------------------------------
-    # Prompt loading (reads from src/prompts/*.md)
+    # Prompt loading (reads from prompts/ at repo root)
     # ------------------------------------------------------------------
 
     def _load_system_prompt(self, prompt_file: str = "prompts/character_creation.md") -> str:
