@@ -164,6 +164,7 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
             inventory_list = ", ".join(state_mgr.player.inventory[-3:]) or "(empty)"
             rep_items = ", ".join(f"{k}(+{v})" for k, v in list(state_mgr.player.reputation.items())[-2:]) or "(none)"
             new_effects = "; ".join(effect_display) if effect_display else "(no effects)"
+            story_context = memory.format_summary(5)
             flavor_context = (
                 f"You just {action_result_raw.intent} at '{world.current_location}'.\n"
                 f"Inventory now: {inventory_list}\n"
@@ -172,6 +173,8 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
                 f"Outcome: {resolve_output['outcome_level']}\n"
                 f"Turn: {world.turn_count}"
             )
+            if story_context:
+                flavor_context += f"\n\n{story_context}"
             outcome_instruction = _load_prompt("outcome_narration.md")
             console.print("[dim][generating narrative…][/dim]")
             narrative = llm.generate_flavor_text(
