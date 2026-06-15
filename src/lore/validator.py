@@ -14,6 +14,17 @@ from src.llm_client import LLMClient
 
 from .parser import LoreParser, LoreDatabase, LoreFact, LoreConstraint, LoreConflict
 
+# ---------------------------------------------------------------------------
+# Prompt loading helper — reads from prompts/ at repo root
+# ---------------------------------------------------------------------------
+
+_PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
+
+
+def _load_prompt(name: str) -> str:
+    path = _PROMPTS_DIR / name
+    return path.read_text(encoding="utf-8").strip() if path.exists() else ""
+
 
 class LLMValidationError:
     """Error returned by LLM validation."""
@@ -93,14 +104,19 @@ class LoreValidator:
     def _generate_revision_options(self, user_input: str, conflicts: List[LoreConflict]) -> List[str]:
         """Generate exactly 3 concrete revised backstory options that resolve the given lore conflicts."""
         conflict_details = "\n".join(f"- {c.conflict_message}" for c in conflicts)
-        revision_prompt = (
-            f"Revise this user's backstory so it fits the world lore.\n\n"
-            f"LORE CONTEXT:\n{self.parser.db.lore_summary[:4000]}\n\n"
-            f"USER INPUT: {user_input!r}\n\n"
-            f"CONFLICTS TO FIX:\n{conflict_details}\n\n"
-            "Return EXACTLY a JSON array of 3 revised backstory strings.\n"
-            'Format: ["revision 1", "revision 2", "revision 3"]\n'
+        template = _load_prompt("backstory_revision.md") or (
+            "Revise this user's backstory so it fits the world lore.\n\n"
+            "LORE CONTEXT:\n{lore_summary}\n\n"
+            "USER INPUT: {user_input}\n\n"
+            "CONFLICTS TO FIX:\n{conflict_details}\n\n"
+            'Return EXACTLY a JSON array of 3 revised backstory strings.\n'
+            "Format: [\"revision 1\", \"revision 2\", \"revision 3\"]\n"
             "No markdown, no code blocks, no explanation."
+        )
+        revision_prompt = template.format(
+            lore_summary=self.parser.db.lore_summary[:4000],
+            user_input=user_input,
+            conflict_details=conflict_details,
         )
 
         try:
@@ -134,31 +150,11 @@ class LoreValidator:
 
     def _create_validation_prompt(self, context: dict) -> str:
         """Create the LLM prompt for validation."""
+        system = _load_prompt("lore_validation.md")
         return (
-            f"Analyze the following user input against the established lore context:\n\n"
+            f"{system}\n\n"
             f"LORE CONTEXT:\n{context.get('lore_summary', '')}\n\n"
-            f'USER INPUT:\n"{context.get("user_input", "")}"\n\n'
-            f"INSTRUCTIONS:\n"
-            "1. Analyze if the user input is consistent with the lore context\n"
-            "2. Identify any conflicts (e.g., forbidden technology, non-existent factions, magic misuse)\n"
-            "3. Consider the setting type, technology level, and magic rules\n"
-            "4. Be strict about lore violations\n\n"
-            f'RESPOND ONLY WITH JSON IN THIS EXACT FORMAT:\n'
-            '{{\n'
-            '    "is_valid": true/false,\n'
-            '    "conflicts": [\n'
-            '        {\n'
-            '            "type": "forbidden_value"|"unknown_faction"|"magic_violation"|"tech_violation"|"setting_violation",\n'
-            '            "message": "Clear explanation of the conflict",\n'
-            '            "severity": "error"|"warning"\n'
-            '        }\n'
-            '    ],\n'
-            '    "suggestions": [\n'
-            '        "Optional suggestion text 1",\n'
-            '        "Optional suggestion text 2"\n'
-            '    ]\n'
-            f'}}\n\n'
-            "Return is_valid=false if ANY conflict is found. Be thorough in checking against the lore."
+            f'USER INPUT:\n"{context.get("user_input", "")}"'
         )
 
     def _parse_llm_response(self, response: str) -> dict:

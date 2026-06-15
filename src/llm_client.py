@@ -35,6 +35,34 @@ class LLMClient:
     def choice_prompt(self) -> str:
         return self._load_system_prompt("prompts/choices.md")
 
+    @property
+    def flavor_prompt(self) -> str:
+        return self._load_system_prompt("prompts/flavor_text.md")
+
+    @property
+    def scene_prompt(self) -> str:
+        return self._load_system_prompt("prompts/scene_description.md")
+
+    @property
+    def intro_prompt(self) -> str:
+        return self._load_system_prompt("prompts/intro_scene.md")
+
+    @property
+    def outcome_prompt(self) -> str:
+        return self._load_system_prompt("prompts/outcome_narration.md")
+
+    @property
+    def turn_scene_prompt(self) -> str:
+        return self._load_system_prompt("prompts/turn_scene.md")
+
+    @property
+    def lore_validation_prompt(self) -> str:
+        return self._load_system_prompt("prompts/lore_validation.md")
+
+    @property
+    def backstory_revision_template(self) -> str:
+        return self._load_system_prompt("prompts/backstory_revision.md")
+
     # ------------------------------------------------------------------
     # Structured generation (Pydantic-validated JSON)
     # ------------------------------------------------------------------
@@ -89,30 +117,12 @@ class LLMClient:
         # All retries exhausted — LLM didn't produce valid extraction.
         raise ValueError("LLM returned no parseable JSON after 3 attempts")
 
-    FLAVOR_SYSTEM_PROMPT = (
-        "You are a dungeon master narrator for a dark fantasy RPG.\n"
-        "Write ONLY the narrative scene description — no thinking, no planning, no meta-commentary.\n"
-        "CRITICAL OUTPUT RULES:\n"
-        "1. Start your response directly with the first word of the scene. Never preface with \"Here is\" or \"The scene shows\"\n"
-        "2. Output ONLY the narrative text — no thinking blocks, no step explanations, no 'let me write'\n"
-        "3. Use exactly 1-2 short sentences. End with a period.\n"
-        "4. If uncertain what to write, describe sensory details (sight, sound, smell) of the immediate environment.\n"
-        "5. Reference specific locations, NPCs, or items by name when possible.\n\n"
-        "WRONG EXAMPLES (do NOT output these):\n"
-        "- \"Here is a description:\" <- meta-commentary\n"
-        "- \"I will write: ...\" <- planning text\n"
-        "- *thinks* \"...\" <- internal monologue\n\n"
-        "CORRECT EXAMPLES:\n"
-        "- \"Dust swirls in the flickering torchlight as a shadow detaches itself from the corner.\"\n"
-        "- \"The elder nods slowly, his gnarled fingers tracing worn symbols on a leather map.\""
-    )
-
     def generate_flavor_text(self, context: str, instruction: str) -> str:
         """Standard text generation for narrative output."""
         response = ollama.chat(
             model=self.model,
             messages=[
-                {"role": "system", "content": self.FLAVOR_SYSTEM_PROMPT},
+                {"role": "system", "content": self.flavor_prompt},
                 {"role": "user", "content": f"{context}\n\n{instruction}"}
             ]
         )

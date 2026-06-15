@@ -1,6 +1,7 @@
 """Game loop — main turn cycle, action resolution, and outcome rendering."""
 
 import sys
+from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -17,6 +18,17 @@ from src.action_engine import resolve_action
 from src.ui.status import show_status
 from src.ui.output import display_outcome, show_dm_choices
 from src.narrative import generate_scene_description, StoryMemory, StoryEvent
+
+# ---------------------------------------------------------------------------
+# Prompt loading helper — reads from prompts/ at repo root
+# ---------------------------------------------------------------------------
+
+_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+
+
+def _load_prompt(name: str) -> str:
+    path = _PROMPTS_DIR / name
+    return path.read_text(encoding="utf-8").strip() if path.exists() else ""
 
 console = Console()
 
@@ -45,14 +57,8 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
         loc = snapshot.get("location", "Unknown")
         if world.turn_count == 1:
             # Turn 1 — fresh introductory scene for a new character
-            intro_context = (
-                "You are the dungeon master narrator for a dark fantasy RPG.\n"
-                "Write an atmospheric introductory paragraph (5-10 sentences) for a player\n"
-                "entering this location for the first time. Include sensory details and end\n"
-                "with a hook or tension point suggesting what might happen next.\n"
-                "Do NOT offer choices or ask what the player does — just set the scene."
-                f"\n\nLocation: [{loc}]\nFirst turn — introduce the setting. Describe the place, the mood, and any notable features. Make it feel alive and immersive."
-            )
+            intro_system = _load_prompt("intro_scene.md")
+            intro_context = f"{intro_system}\n\nLocation: [{loc}]\nFirst turn — introduce the setting. Describe the place, the mood, and any notable features. Make it feel alive and immersive."
             try:
                 console.print("[dim][generating intro…][/dim]")
                 narrative = llm.generate_flavor_text(intro_context,
@@ -66,8 +72,9 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
             recent = memory.get_recent(5)  # last 5 events for context
             recent_events = [StoryEvent(**e) if isinstance(e, dict) else e for e in recent]
             try:
+                turn_scene_instruction = _load_prompt("turn_scene.md")
                 def scene_prompt_fn(ctx_str: str) -> str:
-                    return llm.generate_flavor_text(context=ctx_str, instruction="DM sets the scene in 2-3 atmospheric sentences. Ground it in what just happened and end with a hint of what might come next.")
+                    return llm.generate_flavor_text(context=ctx_str, instruction=turn_scene_instruction)
                 narrative = generate_scene_description(loc, recent_events, scene_prompt_fn)
             except Exception as e:
                 console.print(f"[dim][scene generation skipped] {e}[/dim]")
@@ -161,10 +168,11 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
                 f"Outcome: {resolve_output['outcome_level']}\n"
                 f"Turn: {world.turn_count}"
             )
+            outcome_instruction = _load_prompt("outcome_narration.md")
             console.print("[dim][generating narrative…][/dim]")
             narrative = llm.generate_flavor_text(
                 context=flavor_context,
-                instruction="DM narrates the outcome of this action in 1-2 sentences. Ground it in what just happened — reference specific items, NPCs, or locations that changed."
+                instruction=outcome_instruction,
             )
         except Exception as e:
             console.print(f"[dim][flavor-text failed] {e}[/dim]")

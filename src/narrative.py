@@ -11,7 +11,22 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List
+
+# ---------------------------------------------------------------------------
+# Scene description prompt — loaded from prompts/
+# ---------------------------------------------------------------------------
+
+_PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
+
+
+def _load_prompt(name: str) -> str:
+    path = _PROMPTS_DIR / name
+    return path.read_text(encoding="utf-8").strip() if path.exists() else ""
+
+
+SCENE_SYSTEM_PROMPT = _load_prompt("scene_description.md")
 
 
 # ---------------------------------------------------------------------------
@@ -38,15 +53,6 @@ class StoryEvent:
 # ---------------------------------------------------------------------------
 # Scene Description Generator (LLM-driven)
 # ---------------------------------------------------------------------------
-
-SCENE_SYSTEM_PROMPT = (
-    "You are the dungeon master narrator for a dark fantasy RPG.\n"
-    "Given a location name and recent story events, write an atmospheric "
-    "description of 2-3 sentences that sets the scene for the next player "
-    "turn. Include sensory details (lighting, sounds, smells).\n"
-    "End the paragraph with a hint or tension point that suggests what might happen next."
-)
-
 
 def generate_scene_description(
     location: str,
