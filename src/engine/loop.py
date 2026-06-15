@@ -82,9 +82,11 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
             if narrative:
                 console.print(f"\n[dim]{narrative}[/dim]")
 
-        # --- DM choices ---
+        # --- DM choices (with story context) ---
         try:
-            choices_list = llm.generate_choices(state_mgr.choices_snapshot())
+            cs = state_mgr.choices_snapshot()
+            cs["story_events"] = memory.format_summary(5)
+            choices_list = llm.generate_choices(cs)
         except Exception as e:
             console.print(f"[dim][choice-gen failed, continuing with free-text only] {e}[/dim]")
             choices_list = []
@@ -113,10 +115,12 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
             if 0 <= idx < len(choices_list):
                 parsed_input = choices_list[idx]
 
-        # --- Parse action ---
+        # --- Parse action (with story context) ---
         try:
             console.print("[dim][parsing your action…][/dim]")
-            action_result_raw = llm.generate_action_result(parsed_input, snapshot)
+            ctx = dict(snapshot)  # shallow copy — don't mutate the snapshot used later
+            ctx["story_events"] = memory.format_summary(5)
+            action_result_raw = llm.generate_action_result(parsed_input, ctx)
         except Exception as e:
             console.print(f"\n[red]Action parse failed: {e}[/red]")
             show_status(state_mgr)

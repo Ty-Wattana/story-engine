@@ -230,3 +230,19 @@ class StoryMemory:
 
     def clear(self) -> None:
         self._events.clear()
+
+    def format_summary(self, n: int = 5) -> str:
+        """Return a lightweight text block of recent events for prompt injection.
+
+        Returns an empty string when there are no events so callers can
+        always inject verbatim without conditional logic.
+        """
+        events = list(self._events)[-n:]
+        if not events:
+            return ""
+        lines = ["# RECENT STORY"]
+        for e in events:
+            label = "no outcome" if e.outcome_level == "failure" else e.outcome_level.replace("_", " ").title()
+            target = f" → {e.target_entity}" if e.target_entity else ""
+            lines.append(f"- Turn {e.turn}: {e.player_name} {e.intent}{target} ({label})")
+        return "\n".join(lines)

@@ -248,12 +248,17 @@ class LLMClient:
         Args:
             user_input: exact text the player typed or selected
             state_context: snapshot dict from StateManager.snapshot() containing
-                           player info, inventory, locations, etc.
+                           player info, inventory, locations, etc. May also contain
+                           ``story_events`` (str) for disambiguation against recent events.
         Returns:
             Validated ActionParseResult via Pydantic schema enforcement.
         """
         context_block = json.dumps(state_context, indent=2)
-        prompt = f"Current game state:\n{context_block}\n\nPlayer input: {user_input!r}\n\nParse this action into structured mechanics."
+        story = state_context.get("story_events", "")
+        prompt = f"Current game state:\n{context_block}"
+        if story:
+            prompt += f"\n\n{story}"
+        prompt += f"\n\nPlayer input: {user_input!r}\n\nParse this action into structured mechanics."
 
         return self.generate_structured(
             system_prompt=self.action_prompt,
@@ -268,11 +273,17 @@ class LLMClient:
         Falls back to an empty list on error so the loop never dies.
         """
         context_block = json.dumps(state_context, indent=2)
+        story = state_context.get("story_events", "")
+        context_text = f"Game state:\n{context_block}"
+        if story:
+            context_text += f"\n\n{story}"
+        context_text += "\n\nGenerate action options."
+
         response = ollama.chat(
             model=self.model,
             messages=[
                 {"role": "system", "content": self.choice_prompt},
-                {"role": "user", "content": f"Game state:\n{context_block}\n\nGenerate action options."},
+                {"role": "user", "content": context_text},
             ],
         )
 

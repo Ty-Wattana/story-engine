@@ -289,12 +289,15 @@ class StateManager:
         }
 
     def choices_snapshot(self) -> dict:
-        """Lightweight snapshot for DM choices — only location and turn.
+        """Lightweight snapshot for DM choices — location, turn, and story context.
 
-        Avoids feeding verbose inventory/stats/reputation which causes the LLM
-        to echo state text back as choice content.
+        The `story_events` field is injected by the game loop (via
+        ``StoryMemory.format_summary``) so the LLM can reference what happened
+        recently when generating choices.  Inventory/stats/reputation are
+        intentionally omitted to keep output compact.
         """
         return {
             "location": self.world.current_location,
             "turn": self.world.turn_count,
+            "story_events": "",  # populated by game loop via format_summary()
         }
