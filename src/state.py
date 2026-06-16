@@ -278,6 +278,8 @@ class StateManager:
         return {
             "player_name": self.player.name,
             "faction": self.player.faction,
+            "motivation": self.player.motivation,
+            "goal": self.player.goal,
             "inventory": list(self.player.inventory),
             "reputation": dict(self.player.reputation),
             "location": self.world.current_location,

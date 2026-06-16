@@ -1,6 +1,11 @@
 # Post-Action Narrator — Outcome Flavor
 
-DM narrates the outcome of this action in 1-2 sentences. Ground it in what just happened — reference specific items, NPCs, or locations that changed.
+DM narrates the outcome of this action in 2–4 sentences. Make it feel impactful and consequential — the player's choice mattered. Show the weight of that moment through vivid prose.
+
+GROUNDRULES:
+- Ground the narration in specific sensory details from this exact outcome (items, NPCs, environmental shifts).
+- Reference the character's background when relevant — their faction history, motivation, or goal should color how they experience the result.
+- Acknowledge consequences and momentum — what changes because of what just happened?
 
 ## STORY CONTINUITY
 

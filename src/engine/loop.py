@@ -58,11 +58,19 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
         if world.turn_count == 1:
             # Turn 1 — fresh introductory scene for a new character
             intro_system = _load_prompt("intro_scene.md")
-            intro_context = f"{intro_system}\n\nLocation: [{loc}]\nFirst turn — introduce the setting. Describe the place, the mood, and any notable features. Make it feel alive and immersive."
+            player_motivation = snapshot.get("motivation", "Unknown")
+            player_goal = snapshot.get("goal", "Unknown")
+            player_faction = snapshot.get("faction", "Unknown")
+            intro_context = (
+                f"{intro_system}\n\n"
+                f"Location: [{loc}]\n"
+                f"Character — Faction: {player_faction}, Motivation: {player_motivation}, Goal: {player_goal}\n"
+                "Introduce the setting through the character's eyes. How does this place feel to someone with their history and drives?"
+            )
             try:
                 console.print("[dim][generating intro…][/dim]")
                 narrative = llm.generate_flavor_text(intro_context,
-                    instruction="DM introduces the starting location in 2-3 atmospheric sentences. End with a hook.")
+                    instruction="DM introduces the starting location as a fully fleshed opening scene. At least one full paragraph (5+ sentences). Ground the description in the character's background. End with a hook.")
                 if narrative:
                     console.print(f"\n[dim]{narrative}[/dim]")
             except Exception as e:
@@ -171,7 +179,8 @@ def game_loop(player: Player, world: WorldState, llm: LLMClient) -> None:
                 f"Reputation: {rep_items}\n"
                 f"Effects this turn: {new_effects}\n"
                 f"Outcome: {resolve_output['outcome_level']}\n"
-                f"Turn: {world.turn_count}"
+                f"Turn: {world.turn_count}\n"
+                f"Character — Faction: {snapshot.get('faction', '')}, Motivation: {snapshot.get('motivation', '')}, Goal: {snapshot.get('goal', '')}"
             )
             if story_context:
                 flavor_context += f"\n\n{story_context}"
