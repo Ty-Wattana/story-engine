@@ -67,21 +67,19 @@ def generate_scene_description(
         llm_prompt_fn: callable(context_str) -> str that sends to the Ollama client.
     """
     events_block = "\n".join(
-        "Turn %d: %s attempted '%s' -- outcome: %s"
-        % (e.turn, e.player_name, e.intent, e.outcome_level.replace("_", " "))
+        f"Turn {e.turn}: {e.player_name} attempted '{e.intent}' -- outcome: {e.outcome_level.replace('_', ' ')}"
         for e in recent_events[-5:]
     )
 
     context_text = (
-        "Location: [%s]\n\n"
-        "Recent events:\n%s\n\n"
+        f"Location: [{location}]\n\n"
+        f"Recent events:\n{events_block or '(none yet)'}\n\n"
         "Describe the scene the player will encounter next."
-        % (location, events_block or "(none yet)", location)
     )
 
     try:
         return llm_prompt_fn(SCENE_SYSTEM_PROMPT + "\n\nScene description for "
-                             "[%s]:\n%s" % (location, context_text))
+                             f"[{location}]:\n{context_text}")
     except Exception:
         # Fallback inline generator when LLM is unavailable
         return _fallback_scene_description(location)
@@ -101,7 +99,7 @@ def _fallback_scene_description(location: str) -> str:
         ),
     }
     key = location.lower().replace(" ", "_")
-    return locations.get(key, "The path before %s stretches ahead, uncertain and quiet." % location)
+    return locations.get(key, f"The path before {location} stretches ahead, uncertain and quiet.")
 
 
 # ---------------------------------------------------------------------------

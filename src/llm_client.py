@@ -134,6 +134,12 @@ class LLMClient:
                 result = self._trim_meta(result)
                 break
 
+        # Detect mid-text revision cycles: the LLM "shows its work" by outputting
+        # draft text, then meta-commentary (e.g. '" -> Wait, I shouldn't...'),
+        # then repeats with another draft, and finally emits a clean version at
+        # the end.  Extract only that final clean block.
+        result = self._extract_final_draft(result)
+
         return result or "(nothing happens)"
 
     # ------------------------------------------------------------------
@@ -234,6 +240,91 @@ class LLMClient:
         # Combine until we get something reasonable
         combined = ". ".join(rest)
         return (combined + ".").strip() or "(nothing happens)"
+
+    @staticmethod
+    def _extract_final_draft(text: str) -> str:
+        """Extract clean output from LLM self-correction / draft-revision cycles.
+
+        Some models output internal monologue like:
+
+            "Some draft text." -> Wait, I shouldn't do that...
+            Revised text here. -> Let me fix the quotes.
+            Okay, final version:
+            The actual clean output.
+
+        Returns only the final narrative block, discarding all intermediate drafts
+        and commentary.
+        """
+        lines = text.split('\n')
+
+        # --- Pass 1: explicit revision markers (e.g. "Okay, final version:", "Revised text:") ---
+        MARKER_PATTERNS = [
+            r"(?i)^ok[a-z]*\s*,?\s*(alright\s+)?(?:final\s+)?(?:version|ver)\w*\b",
+            r"(?i)^revised\s+text\b",
+            r"(?i)^\s*final\s*:\s*$",
+            r"(?i)^here\'?s?\s+(the\s+)?(clean|final|correct)\b",
+        ]
+
+        for i, line in enumerate(lines):
+            for pat in MARKER_PATTERNS:
+                if re.search(pat, line):
+                    # Content after the marker is candidate text
+                    candidate = '\n'.join(lines[i + 1:]).strip()
+                    if candidate and len(candidate) > 3:
+                        return candidate
+
+        # Also handle "I will write:" or "Here goes:" type markers that _trim_meta might miss
+        for i, line in enumerate(lines):
+            if re.search(r'(?i)^you\'?ll?\s+get\s+:|^(?:I\s+)?(?:will|got)\s+(?:write|output|text):\s*$', line):
+                candidate = '\n'.join(lines[i + 1:]).strip()
+                if candidate and len(candidate) > 3:
+                    return candidate
+
+        # --- Pass 2: "draft -> commentary" pattern — take content after last meta line ---
+        # Meta lines: contain '" ->' followed by thinking-like words (wait, I need, let me, etc.)
+        LAST_META_RE = re.compile(r'"[^\n]*\s*->\s*(wait|I\s|let\s|oh\s|hmm|right|nope|sorry|ah )', re.IGNORECASE)
+        last_meta_end = 0
+        for i, line in enumerate(lines):
+            if LAST_META_RE.search(line):
+                # Find start of next non-empty line after this meta line
+                for j in range(i + 1, len(lines)):
+                    if lines[j].strip():
+                        candidate = '\n'.join(lines[j:]).strip()
+                        last_meta_end = j
+                        break
+                # Don't return yet — keep looking for deeper meta lines
+
+        if last_meta_end > 0:
+            candidate = '\n'.join(lines[last_meta_end:]).strip()
+            # Strip trailing '" -> ...' fragments that follow the narrative itself
+            for trim in ('" ->', '" ->\n', ' -> ', '.\" ->'):
+                idx = candidate.find(trim)
+                if idx != -1:
+                    candidate = candidate[:idx].strip()
+                    break
+            if candidate and len(candidate) > 3:
+                return candidate
+
+        # --- Pass 3: "block-level" heuristic — find paragraphs separated by meta commentary. ---
+        # Split on blank lines; skip commentary blocks; take the longest non-commentary block.
+        blocks = [b.strip() for b in re.split(r'\n\s*\n', text) if b.strip()]
+        if len(blocks) >= 2:
+            best = None
+            best_len = 0
+            for block in reversed(blocks):
+                # Skip commentary blocks (contain -> with thinking words)
+                if LAST_META_RE.search(block):
+                    continue
+                words = len(block.split())
+                if words < 3:
+                    continue
+                if words > best_len:
+                    best = block
+                    best_len = words
+            if best:
+                return best
+
+        return text
 
     # ------------------------------------------------------------------
     # Action-loop endpoints (Phase 4 additions)

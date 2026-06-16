@@ -166,15 +166,15 @@ class StateManager:
             elif key == "player.stats.str_bonus.inc":
                 # Temporary stat bonus/penalty that stacks — represents a tangible improvement from a crit or penalty from failure.
                 old_val = getattr(self.player.stats, "_str_bonus", 0)
-                setattr(self.player.stats, "_str_bonus", old_val + safe_val)
+                setattr(self.player.stats, "_str_bonus", old_val + int(safe_val))
                 applied[key] = safe_val
             elif key == "player.stats.dex_bonus.inc":
                 old_val = getattr(self.player.stats, "_dex_bonus", 0)
-                setattr(self.player.stats, "_dex_bonus", old_val + safe_val)
+                setattr(self.player.stats, "_dex_bonus", old_val + int(safe_val))
                 applied[key] = safe_val
             elif key == "player.stats.int_bonus.inc":
                 old_val = getattr(self.player.stats, "_int_bonus", 0)
-                setattr(self.player.stats, "_int_bonus", old_val + safe_val)
+                setattr(self.player.stats, "_int_bonus", old_val + int(safe_val))
                 applied[key] = safe_val
             elif key == "player.stats.con_penalty.inc":
                 # Negative bonus (penalty from injury/failure)

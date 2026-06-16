@@ -43,9 +43,9 @@ def build_outcome_panel(result: dict) -> Panel:
     verb = result.get("verb", "?")
     action_type = result.get("action_type", "?")
     target = result.get("target_entity", None)
-    lines.append("[bold]Action:[/] %s | %s (%s)" % (intent, verb, action_type))
+    lines.append(f"[bold]Action:[/] {intent} | {verb} ({action_type})")
     if target:
-        lines.append("  Target: [cyan]%s[/cyan]" % target)
+        lines.append(f"  Target: [cyan]{target}[/cyan]")
 
     dc = result.get("target_dc", 0)
     roll = result.get("dice_roll", 0)
