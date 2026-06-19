@@ -3,11 +3,16 @@
 No game logic, no LLM, no state imports.  Just requests + rich talking to
 the server at http://127.0.0.1:8000.
 
-Run the server first::
+Run the server in one terminal::
 
-    uvicorn src.server:app --host 127.0.0.1 --port 8000 --reload
+    uvicorn src.server:app --host 127.0.0.1 --port 8000
+
+Then run this client in another::
+
+    python main.py
 """
 
+import time
 import requests
 import sys
 
@@ -19,6 +24,27 @@ BASE = "http://127.0.0.1:8000"
 
 
 # ── Helpers ----------------------------------------------------------------
+
+def _wait_for_server(timeout: int = 30) -> None:
+    """Poll /health until the server is alive or timeout fires."""
+    deadline = time.time() + timeout
+    while True:
+        try:
+            r = requests.get(f"{BASE}/health", timeout=2)
+            if r.status_code == 200:
+                return
+        except Exception:
+            pass
+        if time.time() > deadline:
+            break
+    CONSOLE.print(Panel(
+        "[red]Server not running.[/]\n"
+        "Start it in another terminal:\n"
+        "  [bold]uvicorn src.server:app --host 127.0.0.1 --port 8000[/]",
+        style="yellow",
+    ))
+    sys.exit(1)
+
 
 def _post(path: str, body: dict) -> dict:
     """Send a POST and die on non-2xx."""
@@ -36,22 +62,10 @@ def _print_narrative(text: str) -> None:
     CONSOLE.print()
 
 
-# ── Bootstrap prompt -------------------------------------------------------
-
-def _bootstrap() -> str | None:
-    """Ask the user to /start a game or /load an existing one.  Returns session_id."""
-    CONSOLE.print()
-    CONSOLE.print("[bold bright_magenta]═══ Story Engine ═══[/]")
-    CONSOLE.print("  [cyan]/start[/] — begin a new adventure")
-    CONSOLE.print("  [cyan]/load <slot>[/] — continue an existing save")
-    CONSOLE.print("  [cyan]/quit[/] — exit")
-    CONSOLE.print()
-    return None
-
-
 # ── Main loop --------------------------------------------------------------
 
 def main() -> None:
+    _wait_for_server()
     session_id: str | None = None
 
     while True:
