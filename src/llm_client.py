@@ -108,10 +108,8 @@ class LLMClient:
             if extracted is not None:
                 try:
                     parsed = schema.model_validate_json(extracted)
-                    if self._looks_valid(parsed, schema):
-                        return parsed
+                    return parsed  # Pydantic already validates structure — no heuristic needed
                 except Exception:
-                    last_exc = raw_exc if 'raw_exc' in locals() else last_exc
                     continue
 
         # All retries exhausted — LLM didn't produce valid extraction.
@@ -180,13 +178,10 @@ class LLMClient:
 
     @staticmethod
     def _looks_valid(parsed: Any, schema: Type[BaseModel]) -> bool:
-        """Heuristic check that a Pydantic parse succeeded with sensible fields.
+        """Accept if Pydantic already validated — the heuristic was false-positive prone.
 
-        Rejects results where required string fields are empty or contain
-        likely-incorrect defaults (e.g., "assistant" when the model confused
-        itself for the AI character).
+        Kept only for origin_faction anti-hallucination (model echoing prompt examples).
         """
-        # If already a Pydantic model, just check its attributes directly
         if isinstance(parsed, BaseModel):
             obj = parsed
         else:
@@ -195,31 +190,16 @@ class LLMClient:
             except Exception:
                 return False
 
-        vals: dict[str, str] = {}
-        for field_name, field_info in schema.model_fields.items():
-            value = obj.__dict__.get(field_name)
-            if isinstance(value, str):
-                stripped = value.strip()
-                # Reject empty or whitespace-only fields
-                if not stripped:
-                    return False
-                vals[field_name] = stripped
-                # Common hallucination patterns — model confuses itself for the AI character
-                ai_defaults = {"assistant", "ai", "llm", "model", "chatbot", "bot", "system"}
-                if field_name in ("origin_faction",) and stripped.lower() in ai_defaults:
-                    return False
-            else:
-                vals[field_name] = ""
-
-        # Known extraction defaults — the model may echo these from its prompt examples.
-        # Reject only when ALL three fields are known extraction defaults simultaneously,
-        # indicating the model didn't actually extract from the input.
+        faction = obj.__dict__.get("origin_faction", "")
+        if isinstance(faction, str):
+            ai_defaults = {"assistant", "ai", "llm", "model", "chatbot", "bot", "system"}
+            if faction.strip().lower() in ai_defaults:
+                return False
+        # Known extraction defaults — reject only when ALL three match.
         _EXTRACTION_DEFAULTS = {"Wanderer", "Discovery", "Forge your own path"}
-        if vals.get("origin_faction") in _EXTRACTION_DEFAULTS and \
-           vals.get("motivation") in _EXTRACTION_DEFAULTS and \
-           vals.get("goal") in _EXTRACTION_DEFAULTS:
+        vals = {f: str(obj.__dict__.get(f, "")) for f in ("origin_faction", "motivation", "goal")}
+        if all(vals[f] in _EXTRACTION_DEFAULTS for f in vals):
             return False
-
         return True
 
     @staticmethod
@@ -361,8 +341,12 @@ class LLMClient:
         """Generate in-world DM choice options for the player.
 
         Returns a JSON array of strings parsed by Pydantic auto-validation.
-        Falls back to an empty list on error so the loop never dies.
+        Falls back to an empty list on parse error (loop never dies).
+        Logs unparseable responses so misconfigured prompts are visible.
         """
+        import logging
+        log = logging.getLogger(__name__)
+
         context_block = json.dumps(state_context, indent=2)
         story = state_context.get("story_events", "")
         context_text = f"Game state:\n{context_block}"
@@ -390,26 +374,21 @@ class LLMClient:
             if isinstance(result, list):
                 return [str(c) for c in result]
         except (json.JSONDecodeError, ValueError):
-            pass
+            log.warning("generate_choices: failed to parse LLM JSON output — using fallback")
 
-        # Last-resort: split by bullets or numbered lines, skipping markdown noise
+        # Last-resort: split by bullets or numbered lines, stripping markdown noise
         fallback = []
         for line in text.splitlines():
             stripped = line.strip()
-
-            # Skip empty, too short, or overly long lines
             if not stripped or len(stripped) > 120:
                 continue
-
-            # Skip markdown headers, horizontal rules, and pipe-delimited rows
             if re.match(r"^#{1,6}\s|^[-*_]{3,}$|^\|", stripped):
                 continue
 
-            # Strip leading bullets/numbers then remove structural chars (pipes, bold markers)
+            # Strip bullets/numbers, remove structural chars
             core = re.sub(r"^\d+\.\s*", "", stripped)
-            core = re.sub(r"^[-•*]+\s*", "", core).strip()
-            core = re.sub(r"[|`_*]", "", core).strip()
-
-            if 10 < len(core) < 120:
+            core = re.sub(r"^[•*\-]+\s*", "", core)
+            core = re.sub(r"[`_|*]", "", core).strip()
+            if len(core) >= 10 and len(core) < 120:
                 fallback.append(core)
         return fallback[:6] if fallback else []
