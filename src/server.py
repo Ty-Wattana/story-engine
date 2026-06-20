@@ -326,29 +326,29 @@ async def save_game(req: SaveRequest):
 
 @app.post("/system/load")
 async def load_game(req: LoadRequest):
-    """Duplicate the named session into a brand-new session + return recent context."""
+    """Continue play from a named save slot — returns the session's current state."""
     try:
-        new_sid = duplicate_session(req.slot_name)
+        sid = duplicate_session(req.slot_name)
     except ValueError as exc:
         raise HTTPException(404, str(exc))
     except Exception as exc:
-        raise HTTPException(500, f"Load/duplicate failed: {exc}")
+        raise HTTPException(500, f"Load failed: {exc}")
 
-    session_data = fetch_session(session_id=new_sid)
+    session_data = fetch_session(session_id=sid)
     if not session_data or "player_state" not in session_data:
-        raise HTTPException(404, "Just-created session data missing (impossible).")
+        raise HTTPException(404, "Session data missing.")
 
     player = _load_player(session_data["player_state"])
     world = _load_world(session_data["world_state"])
-    last_choices = session_data.get("last_choices", [])
 
-    recent = fetch_messages(new_sid, limit=3)
+    # ponytail: no narrative context — next action generates fresh scene;
+    # copying history causes intro re-display alongside current-turn choices.
     return LoadResponse(
-        session_id=new_sid,
-        narrative_context=[m["content"] for m in recent],
+        session_id=sid,
+        narrative_context=[],
         player_state=_dc_asdict(player),
         world_state=_dc_asdict(world),
-        choices=last_choices,
+        choices=session_data.get("last_choices", []),
     )
 
 
