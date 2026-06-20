@@ -177,15 +177,12 @@ async def start_game(req: StartRequest):
         "narrative": narrative,
     })
 
-    # 6. Persist session (single call — includes choices)
+    # 6. Persist session + intro message (single call)
     sid = create_session(
         player_state=player,
         world_state=world,
         last_choices=choices,
     )
-
-    # Session has no slot yet at creation — set it in update_session and pass None here
-    sid = create_session(player_state=player, world_state=world, last_choices=choices)
     append_message(sid, "system", f"[Game Started — Backstory parsed]\n{narrative}", save_slot=None)
 
     return StartResponse(session_id=sid, narrative=narrative, choices=choices)

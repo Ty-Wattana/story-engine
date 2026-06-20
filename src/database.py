@@ -43,7 +43,7 @@ def _init_db(conn: sqlite3.Connection | None = None) -> None:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS game_sessions (
                 session_id TEXT PRIMARY KEY,
-                save_slot  TEXT,           -- nullable named save slot
+                save_slot  TEXT UNIQUE,    -- nullable unique named save slot
                 player_state TEXT NOT NULL, -- JSON
                 world_state  TEXT NOT NULL, -- JSON
                 last_choices TEXT DEFAULT '[]',  -- JSON array of action choice strings
@@ -77,6 +77,29 @@ def _init_db(conn: sqlite3.Connection | None = None) -> None:
             CREATE INDEX IF NOT EXISTS idx_gs_save_slot
                 ON game_sessions(save_slot)
         """)
+        # Migration: clean up duplicate rows that may exist before the UNIQUE constraint.
+        # Keep one row per save_slot (most recent by ROWID); delete older clones and their message_history children.
+        dupes = conn.execute("""
+            SELECT save_slot AS slot_name, MIN(ROWID) AS orphan_rowid
+            FROM game_sessions
+            WHERE save_slot IS NOT NULL
+              AND save_slot != ''
+              AND save_slot != '_default'
+            GROUP BY save_slot
+            HAVING COUNT(*) > 1
+        """).fetchall()
+        for d in dupes:
+            # Delete children first to avoid FK constraint failures
+            conn.execute(
+                "DELETE FROM message_history WHERE session_id = ("
+                "  SELECT session_id FROM game_sessions WHERE ROWID = ?"
+                ")",
+                (d["orphan_rowid"],),
+            )
+            conn.execute(
+                "DELETE FROM game_sessions WHERE ROWID = ?",
+                (d["orphan_rowid"],),
+            )
         conn.commit()
     finally:
         if _owns:
@@ -186,12 +209,18 @@ def fetch_session(session_id: str | None = None, save_slot: str | None = None) -
 
 
 def save_slot_name(session_id: str, slot_name: str) -> None:
-    """Assign / overwrite the named save-slot for a session."""
+    """Assign / overwrite the named save-slot for a session (and all its messages)."""
     conn = _get_conn()
     try:
+        now = datetime.now(timezone.utc).isoformat()
         conn.execute(
             "UPDATE game_sessions SET save_slot = ?, last_updated = ? WHERE session_id = ?",
-            (slot_name, datetime.now(timezone.utc).isoformat(), session_id),
+            (slot_name, now, session_id),
+        )
+        # Propagate to every message row so the slot stays in sync on load.
+        conn.execute(
+            "UPDATE message_history SET save_slot = ? WHERE session_id = ?",
+            (slot_name, session_id),
         )
         conn.commit()
     finally:
@@ -241,43 +270,60 @@ def fetch_messages(session_id: str, limit: int = 5) -> list[dict[str, Any]]:
         conn.close()
 
 
-def duplicate_session(old_slot: str) -> str:
-    """Duplicate every row under *old_slot* into a brand-new session.
+def duplicate_session(slot_name: str) -> str:
+    """Load the session identified by *slot_name* into a working copy.
 
-    Returns the new session_id.
+    If a clone of this slot already exists (from a previous load), it is
+    updated in-place so that only one row per save_slot name ever exists.
+    Returns the session_id of the working copy.
     """
-    src = fetch_session(save_slot=old_slot)
+    src = fetch_session(save_slot=slot_name)
     if src is None:
-        raise ValueError(f"No session found with save slot '{old_slot}'")
+        raise ValueError(f"No session found with save slot '{slot_name}'")
 
-    new_sid = uuid.uuid4().hex
     conn = _get_conn()
     try:
-        # Insert new session row (don't preserve last_updated from original to avoid confusion)
         now = datetime.now(timezone.utc).isoformat()
-        last_choices = json.loads(src.get("last_choices", "[]")) if src.get("last_choices") else []
-        conn.execute(
-            "INSERT INTO game_sessions (session_id, save_slot, player_state, world_state, last_choices, last_updated) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (new_sid, None, _to_json(src["player_state"]), _to_json(src["world_state"]), json.dumps(last_choices), now),
-        )
 
-        # Copy message history (carry forward save_slot from source session)
-        src_slot = src.get("save_slot")
+        # Find an existing clone to reuse (prevents duplication in the DB)
+        clone_row = conn.execute(
+            "SELECT * FROM game_sessions WHERE save_slot = ? AND session_id != ?",
+            (slot_name, src["session_id"]),
+        ).fetchone()
+
+        if clone_row is not None:
+            # Reuse existing clone row — update its data but keep its session_id
+            sid = clone_row["session_id"]
+            conn.execute(
+                "UPDATE game_sessions SET player_state = ?, world_state = ?, last_choices = ?, last_updated = ? WHERE session_id = ?",
+                (_to_json(src["player_state"]), _to_json(src["world_state"]), json.dumps(src.get("last_choices", [])), now, sid),
+            )
+        else:
+            # First load: create a new clone row
+            sid = uuid.uuid4().hex
+            conn.execute(
+                "INSERT INTO game_sessions (session_id, save_slot, player_state, world_state, last_choices, last_updated) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (sid, slot_name, _to_json(src["player_state"]), _to_json(src["world_state"]), json.dumps(src.get("last_choices", [])), now),
+            )
+
+        # Copy message history into the working session_id.
+        # Clear old messages for this clone so we don't double-count.
+        conn.execute("DELETE FROM message_history WHERE session_id = ?", (sid,))
         rows = conn.execute(
-            "SELECT role, content, save_slot FROM message_history WHERE session_id = ? ORDER BY id",
+            "SELECT role, content FROM message_history WHERE session_id = ? ORDER BY id",
             (src["session_id"],),
         ).fetchall()
         for r in rows:
             conn.execute(
                 "INSERT INTO message_history (session_id, save_slot, role, content) VALUES (?, ?, ?, ?)",
-                (new_sid, src_slot, r["role"], r["content"]),
+                (sid, slot_name, r["role"], r["content"]),
             )
         conn.commit()
     finally:
         conn.close()
 
-    return new_sid
+    return sid
 
 
 # ── JSON serialisation helpers ───────────────────────────────────────

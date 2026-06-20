@@ -19,6 +19,11 @@ import sys
 from rich.console import Console
 from rich.panel import Panel
 
+# Escapes Rich markup characters in untrusted text (LPL/LLM output, user input).
+def _esc(s: str) -> str:
+    return s.replace("[", "\\[").replace("]", "\\]")
+
+
 CONSOLE = Console()
 BASE = "http://127.0.0.1:8000"
 
@@ -64,8 +69,9 @@ def _print_narrative(text: str) -> None:
 
 def _print_choices(choices: list[str]) -> None:
     """Print numbered action choices as a styled panel."""
-    lines = [f"[yellow][{i}] {c}[/]" for i, c in enumerate(choices, 1)]
-    CONSOLE.print(Panel("\n".join(lines), border_style="yellow", title="[bold]Choices[/]", padding=(0, 2)), markup=False)
+    # Build plain string with escaped brackets — Rich markup can't parse LLM-generated text safely.
+    body = "\n".join(f"[{i}] {_esc(c)}" for i, c in enumerate(choices, 1))
+    CONSOLE.print(Panel(body, border_style="yellow", title="[bold]Choices[/]", padding=(0, 2)), markup=False)
 
 
 # ── Main loop --------------------------------------------------------------
@@ -121,7 +127,7 @@ def main() -> None:
             try:
                 resp = _post("/system/load", {"slot_name": arg.strip()})
             except requests.RequestException as exc:
-                CONSOLE.print(Panel(f"Load failed: {exc}", style="red"))
+                CONSOLE.print(Panel(f"Load failed: {exc}", style="red"), markup=False)
                 continue
             session_id = resp["session_id"]
             ctx = resp.get("narrative_context", [])
