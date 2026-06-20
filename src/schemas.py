@@ -7,7 +7,7 @@ from typing import List, Optional, Dict, Any, Literal
 # ---------------------------------------------------------------------------
 
 class ChoicesResponse(BaseModel):
-    choices: list[str] = Field(min_length=3, max_length=4, description="3 to 4 suggested action phrases.")
+    choices: list[str] = Field(min_length=1, max_length=4, description="1 to 4 suggested action phrases.")
 
 
 # ---------------------------------------------------------------------------

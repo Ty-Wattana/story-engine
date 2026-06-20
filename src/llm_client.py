@@ -342,7 +342,7 @@ class LLMClient:
 
         Uses a lightweight summary of state (not full JSON dump) to keep
         Ollama input tokens low — choices only need location + outcome context.
-        Falls back to empty list on parse error (loop never dies).
+        Falls back to procedural choices when LLM is unavailable.
         """
         # Lightweight summary instead of json.dumps(state_context) which dumps
         # the full Pydantic dataclass as nested JSON (huge token count).
@@ -366,5 +366,12 @@ class LLMClient:
             )
             return result.choices
         except Exception as exc:
-            # Loop never dies — return empty choices silently
-            return []
+            # Loop never dies — use procedural fallback instead of empty list.
+            # Empty choices means nothing shown to player; fallback always gives options.
+            loc = ctx.get("location", "the area")
+            return [
+                f"Examine the area around you",
+                f"Check your inventory and notes",
+                f"Search for other people or NPCs nearby",
+                f"Move in a new direction",
+            ]
