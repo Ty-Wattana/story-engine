@@ -22,8 +22,29 @@ This project implements a **neuro-symbolic architecture** for a D&D 5e-inspired 
 8. Rich-formatted outcome panel displayed to player
 
 ## Project Structure
+### Entry Points
+- **CLI**: `python -m src.engine.loop` (or `python src/engine/loop.py main()`) — terminal game loop
+- **HTTP API**: `uvicorn src.server:app --host 127.0.0.1 --port 8000 --reload` — FastAPI server
+
+### Packages (`src/`)
+```
+src/
+├── engine/        # Game loop (loop.py) + character creation (creation.py)
+├── lore/          # Lore validation package
+├── ui/            # Rich UI helpers (status display, outcome rendering)
+└── __init__.py
+server.py          # FastAPI HTTP API endpoints
+database.py        # SQLite persistence layer (sessions + message history)
+state.py           # Symbolic state engine
+schemas.py         # Pydantic validation schemas
+llm_client.py      # Ollama client wrapper
+action_engine.py   # D&D dice rolling, outcome evaluation, effect resolution
+narrative.py       # Scene descriptions, story memory, event tracking
+```
+
 ### Entry Point
-- `main.py` — repo root entry point; game loop, character creation, status display, action resolution
+- **CLI**: `python -m src.engine.loop` — game loop, character creation, status display, action resolution
+- **HTTP API**: `uvicorn src.server:app --host 127.0.0.1 --port 8000 --reload` — stateless game engine with session persistence
 
 ### State & Engine (`src/`)
 - `src/state.py` — Symbolic state:
@@ -68,10 +89,22 @@ This project implements a **neuro-symbolic architecture** for a D&D 5e-inspired 
 
 ### Data & Prompts
 - `data/lore.md` / `data/lore_summary.md` — World lore: factions, magic rules, technology constraints, tone guidelines
-- `prompts/character_creation.md` — System prompt instructing LLM to extract CharacterProfile from backstory text (origin_faction, motivation one-word tag, goal)
+- `data/game.db` — SQLite DB (auto-created); stores game_sessions + message_history tables
+- `prompts/character_creation.md` — System prompt instructing LLM to extract CharacterProfile from backstory text
+- `prompts/` — All other prompts: intro_scene, turn_scene, scene_description, outcome_narration, choices, action, lore_validation, backstory_revision, flavor_text
+
+### HTTP API Endpoints (`src/server.py`)
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/game/start` | Start new campaign from backstory; returns `session_id` + intro narrative |
+| POST | `/game/action` | Process player action through full neuro-symbolic pipeline; returns narrative, dice outcome, updated state |
+| POST | `/system/save` | Assign named save slot to session |
+| POST | `/system/load` | Duplicate named session into new session; return loaded state + context |
+| GET | `/health` | Health check (version 0.2.0) |
 
 ## Key Dependencies
-- `ollama==0.6.2` — Local LLM client; default model: `qwen3.5:64k`, configurable via `LLMClient.__init__()`
+- `ollama==0.6.2` — Local LLM client; configurable target model (check `LLMClient.__init__()`)
+- `fastapi==0.137.2` / `starlette==1.3.1` — HTTP API server framework
 - `pydantic==2.13.3` — Data validation and schema enforcement (`model_json_schema()`, `model_validate_json()`)
 - `rich==15.0.0` — Terminal UI panels/tables for negotiation display, status headers, outcome panels
 
@@ -137,10 +170,26 @@ pip install -r requirements.txt
 ```
 
 ## Running the Application
-```bash
-# Run the game engine (requires ollama running with qwen3.5:64k)
-python main.py
 
-# Run lore validator module directly for testing
+### CLI Mode
+```bash
+# Run the terminal game loop (requires ollama running)
+python -m src.engine.loop
+```
+
+### HTTP API Mode
+```bash
+# Start the FastAPI server (development with auto-reload)
+uvicorn src.server:app --host 127.0.0.1 --port 8000 --reload
+
+# API docs available at http://127.0.0.1:8000/docs
+```
+
+### Testing
+```bash
+# Test lore validator directly
 python -c "from src.lore.validator import create_validator; v = create_validator()"
+
+# Test database layer
+python -c "from src.database import _get_conn; c = _get_conn(); print(c.execute('SELECT name FROM sqlite_master').fetchall())"
 ```
