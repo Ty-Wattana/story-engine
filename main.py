@@ -155,6 +155,16 @@ def main() -> None:
             CONSOLE.print("[dim]Usage: /load <slot_name>[/]")
             continue
 
+        if cmd == "/delete" and arg:
+            slot = arg.strip()
+            r = requests.post(f"{BASE}/system/delete", json={"slot_name": slot}, timeout=5)
+            if r.status_code >= 400:
+                CONSOLE.print(Panel(f"Delete failed ({r.status_code}): {r.text}", style="red"), markup=False)
+            else:
+                resp = r.json()
+                CONSOLE.print(f"[green]{resp.get('status', 'deleted')} slot '{slot}'[/]")
+            continue
+
         # ── Player action (default) ─────────────────────────────────────
         current_choices = _send_action(session_id, raw)
         if current_choices:
@@ -169,12 +179,12 @@ def _send_action(session_id: str, player_input: str) -> list[str]:
 
 def _bootstrap_prompt(sid: str | None) -> None:
     tag = f"[bold yellow]{sid}[/]" if sid else "[dim]no active session[/]"
-    CONSOLE.print(f"  Session: {tag}  [dim]> /start  /load <slot>  /quit[/]")
+    CONSOLE.print(f"  Session: {tag}  [dim]> /start  /load <slot>  /delete <slot>  /quit[/]")
 
 
 def _action_prompt(sid: str | None, choices: list[str] | None = None) -> None:
     tag = f"[bold yellow]{sid}[/]" if sid else "?"
-    parts = [f"\n[dim]Session: {tag}  |  /save <name>  /load <slot>  /quit[/]"]
+    parts = [f"\n[dim]Session: {tag}  |  /save <name>  /load <slot>  /delete <slot>  /quit[/]"]
     if choices:
         parts.append(f"  [dim][[1-{len(choices)}] to choose, or type freely[/]")
     CONSOLE.print("\n".join(parts))

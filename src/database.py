@@ -283,6 +283,24 @@ def duplicate_session(slot_name: str) -> str:
     return src["session_id"]
 
 
+def delete_session_by_slot(slot_name: str) -> bool:
+    """Delete a session and its message history by save-slot name. Returns True if deleted."""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT session_id FROM game_sessions WHERE save_slot = ?", (slot_name,)
+        ).fetchone()
+        if row is None:
+            return False
+        sid = row["session_id"]
+        conn.execute("DELETE FROM message_history WHERE session_id = ?", (sid,))
+        conn.execute("DELETE FROM game_sessions WHERE session_id = ?", (sid,))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
 # ── JSON serialisation helpers ───────────────────────────────────────
 
 def _to_json(obj: Any) -> str:

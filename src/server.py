@@ -24,6 +24,7 @@ from src.database import (
     fetch_messages,
     save_slot_name,
     duplicate_session,
+    delete_session_by_slot,
 )
 from src.schemas import CharacterProfile, ActionParseResult
 from src.action_engine import resolve_action, apply_outcome_effects
@@ -76,6 +77,10 @@ class LoadResponse(BaseModel):
     player_state: dict[str, Any]
     world_state: dict[str, Any]
     choices: list[str] = Field(default_factory=list, description="Suggested next actions for the player.")
+
+
+class DeleteRequest(BaseModel):
+    slot_name: str = Field(min_length=1, max_length=64)
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +355,18 @@ async def load_game(req: LoadRequest):
         world_state=_dc_asdict(world),
         choices=session_data.get("last_choices", []),
     )
+
+
+@app.post("/system/delete")
+async def delete_game(req: DeleteRequest):
+    """Delete a named save session and its message history."""
+    try:
+        deleted = delete_session_by_slot(req.slot_name)
+    except Exception as exc:
+        raise HTTPException(500, f"Delete failed: {exc}")
+    if not deleted:
+        raise HTTPException(404, f"No session with slot '{req.slot_name}'")
+    return {"status": "deleted", "slot_name": req.slot_name}
 
 
 # ---------------------------------------------------------------------------
