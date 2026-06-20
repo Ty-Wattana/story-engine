@@ -48,7 +48,7 @@ def _wait_for_server(timeout: int = 30) -> None:
 
 def _post(path: str, body: dict) -> dict:
     """Send a POST and die on non-2xx."""
-    resp = requests.post(f"{BASE}{path}", json=body, timeout=120)
+    resp = requests.post(f"{BASE}{path}", json=body, timeout=None)
     if resp.status_code >= 400:
         CONSOLE.print(Panel(f"Error {resp.status_code}: {resp.text}", style="red"))
         sys.exit(1)
@@ -58,8 +58,14 @@ def _post(path: str, body: dict) -> dict:
 def _print_narrative(text: str) -> None:
     """Wrap narrative in a styled panel for readability."""
     CONSOLE.print()
-    CONSOLE.print(Panel(text.strip(), border_style="bright_cyan", padding=(0, 2)))
+    CONSOLE.print(Panel(text.strip(), border_style="bright_cyan", padding=(0, 2)), markup=False)
     CONSOLE.print()
+
+
+def _print_choices(choices: list[str]) -> None:
+    """Print numbered action choices as a styled panel."""
+    lines = [f"[yellow][{i}] {c}[/]" for i, c in enumerate(choices, 1)]
+    CONSOLE.print(Panel("\n".join(lines), border_style="yellow", title="[bold]Choices[/]", padding=(0, 2)), markup=False)
 
 
 # ── Main loop --------------------------------------------------------------
@@ -67,16 +73,26 @@ def _print_narrative(text: str) -> None:
 def main() -> None:
     _wait_for_server()
     session_id: str | None = None
+    current_choices: list[str] = []
 
     while True:
         # Display help bar when no session is active.
         if session_id is None:
             _bootstrap_prompt(session_id)
         else:
-            _action_prompt(session_id)
+            _action_prompt(session_id, current_choices)
 
         raw = CONSOLE.input().strip()
         if not raw:
+            continue
+
+        # ── Digit shortcut → mapped choice ──────────────────────────────
+        if raw.isdigit() and 1 <= int(raw) <= len(current_choices):
+            resolved = current_choices[int(raw) - 1]
+            CONSOLE.print(f"[dim]> {resolved}[/]")
+            current_choices = _send_action(session_id, resolved)
+            if current_choices:
+                _print_choices(current_choices)
             continue
 
         parts = raw.split(None, 1)
@@ -95,6 +111,9 @@ def main() -> None:
             resp = _post("/game/start", {"player_name": name, "backstory": name})
             session_id = resp["session_id"]
             _print_narrative(resp["narrative"])
+            current_choices = resp.get("choices", [])
+            if current_choices:
+                _print_choices(current_choices)
             continue
 
         # ── Bootstrap: /load ────────────────────────────────────────────
@@ -110,6 +129,9 @@ def main() -> None:
                 _print_narrative(ctx[-1])
             else:
                 CONSOLE.print("[dim]Session loaded — no recent context.[/]")
+            current_choices = resp.get("choices", [])
+            if current_choices:
+                _print_choices(current_choices)
             continue
 
         # ── In-session commands ─────────────────────────────────────────
@@ -128,8 +150,15 @@ def main() -> None:
             continue
 
         # ── Player action (default) ─────────────────────────────────────
-        resp = _post("/game/action", {"session_id": session_id, "player_input": raw})
-        _print_narrative(resp["narrative"])
+        current_choices = _send_action(session_id, raw)
+        if current_choices:
+            _print_choices(current_choices)
+
+def _send_action(session_id: str, player_input: str) -> list[str]:
+    """POST to /game/action, print narrative. Return new choices for caller to use."""
+    resp = _post("/game/action", {"session_id": session_id, "player_input": player_input})
+    _print_narrative(resp["narrative"])
+    return resp.get("choices", [])
 
 
 def _bootstrap_prompt(sid: str | None) -> None:
@@ -137,9 +166,12 @@ def _bootstrap_prompt(sid: str | None) -> None:
     CONSOLE.print(f"  Session: {tag}  [dim]> /start  /load <slot>  /quit[/]")
 
 
-def _action_prompt(sid: str | None) -> None:
+def _action_prompt(sid: str | None, choices: list[str] | None = None) -> None:
     tag = f"[bold yellow]{sid}[/]" if sid else "?"
-    CONSOLE.print(f"\n[dim]Session: {tag}  |  /save <name>  /load <slot>  /quit[/]")
+    parts = [f"\n[dim]Session: {tag}  |  /save <name>  /load <slot>  /quit[/]"]
+    if choices:
+        parts.append(f"  [dim][[1-{len(choices)}] to choose, or type freely[/]")
+    CONSOLE.print("\n".join(parts))
 
 
 if __name__ == "__main__":

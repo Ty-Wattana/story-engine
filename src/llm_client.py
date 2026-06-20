@@ -5,7 +5,7 @@ import re
 from pydantic import BaseModel
 from typing import Type, TypeVar, Any
 
-from src.schemas import ActionParseResult
+from src.schemas import ActionParseResult, ChoicesResponse
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -337,58 +337,34 @@ class LLMClient:
             schema=ActionParseResult,
         )
 
-    def generate_choices(self, state_context: dict) -> list[str]:
+    def generate_choices(self, ctx: dict) -> list[str]:
         """Generate in-world DM choice options for the player.
 
-        Returns a JSON array of strings parsed by Pydantic auto-validation.
-        Falls back to an empty list on parse error (loop never dies).
-        Logs unparseable responses so misconfigured prompts are visible.
+        Uses a lightweight summary of state (not full JSON dump) to keep
+        Ollama input tokens low — choices only need location + outcome context.
+        Falls back to empty list on parse error (loop never dies).
         """
-        import logging
-        log = logging.getLogger(__name__)
-
-        context_block = json.dumps(state_context, indent=2)
-        story = state_context.get("story_events", "")
-        context_text = f"Game state:\n{context_block}"
+        # Lightweight summary instead of json.dumps(state_context) which dumps
+        # the full Pydantic dataclass as nested JSON (huge token count).
+        parts = []
+        for key in ("player_name", "faction", "motivation", "location", "turn"):
+            val = ctx.get(key)
+            if val:
+                parts.append(f"{key}: {val}")
+        if outcome := ctx.get("outcome"):
+            parts.append(f"last_outcome: {outcome}")
+        story = ctx.get("story_events") or ctx.get("narrative", "")
         if story:
-            context_text += f"\n\n{story}"
-        context_text += "\n\nGenerate action options."
-
-        response = ollama.chat(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": self.choice_prompt},
-                {"role": "user", "content": context_text},
-            ],
-        )
-
-        text = response["message"]["content"].strip()
-
-        # Try markdown fences first
-        m = re.search(r"```(?:json)?\s*([\[\s\S]*?)\s*```", text)
-        if m:
-            text = m.group(1)
+            parts.append(f"recent: {story[-300:]}")  # last 300 chars only
+        context_text = "\n".join(parts) + "\n\nGenerate action options."
 
         try:
-            result = json.loads(text)
-            if isinstance(result, list):
-                return [str(c) for c in result]
-        except (json.JSONDecodeError, ValueError):
-            log.warning("generate_choices: failed to parse LLM JSON output — using fallback")
-
-        # Last-resort: split by bullets or numbered lines, stripping markdown noise
-        fallback = []
-        for line in text.splitlines():
-            stripped = line.strip()
-            if not stripped or len(stripped) > 120:
-                continue
-            if re.match(r"^#{1,6}\s|^[-*_]{3,}$|^\|", stripped):
-                continue
-
-            # Strip bullets/numbers, remove structural chars
-            core = re.sub(r"^\d+\.\s*", "", stripped)
-            core = re.sub(r"^[•*\-]+\s*", "", core)
-            core = re.sub(r"[`_|*]", "", core).strip()
-            if len(core) >= 10 and len(core) < 120:
-                fallback.append(core)
-        return fallback[:6] if fallback else []
+            result = self.generate_structured(
+                system_prompt=self.choice_prompt,
+                user_prompt=context_text,
+                schema=ChoicesResponse,
+            )
+            return result.choices
+        except Exception as exc:
+            # Loop never dies — return empty choices silently
+            return []

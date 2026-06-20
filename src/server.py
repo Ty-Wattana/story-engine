@@ -44,6 +44,7 @@ class StartRequest(BaseModel):
 class StartResponse(BaseModel):
     session_id: str
     narrative: str
+    choices: list[str] = Field(default_factory=list, description="Suggested next actions for the player.")
 
 
 class ActionRequest(BaseModel):
@@ -57,6 +58,7 @@ class ActionResponse(BaseModel):
     outcome: dict[str, Any]
     updated_player_state: dict[str, Any]
     updated_world_state: dict[str, Any]
+    choices: list[str] = Field(default_factory=list, description="Suggested next actions for the player.")
 
 
 class SaveRequest(BaseModel):
@@ -66,6 +68,14 @@ class SaveRequest(BaseModel):
 
 class LoadRequest(BaseModel):
     slot_name: str = Field(min_length=1, max_length=64)
+
+
+class LoadResponse(BaseModel):
+    session_id: str
+    narrative_context: list[str]
+    player_state: dict[str, Any]
+    world_state: dict[str, Any]
+    choices: list[str] = Field(default_factory=list, description="Suggested next actions for the player.")
 
 
 # ---------------------------------------------------------------------------
@@ -151,9 +161,6 @@ async def start_game(req: StartRequest):
     )
     world = WorldState(current_location="The Void")
 
-    # 3. Persist new session
-    sid = create_session(player_state=player, world_state=world)
-
     # 4. Intro narrative (LLM flavor only — never modifies state)
     intro_system = client._load_system_prompt("prompts/intro_scene.md")
     narrative = client.generate_flavor_text(
@@ -161,9 +168,27 @@ async def start_game(req: StartRequest):
         instruction="Write an opening scene for the adventure.",
     )
 
-    append_message(sid, "system", f"[Game Started — Backstory parsed]\n{narrative}")
+    # 5. Generate initial choices (lightweight context only)
+    choices = client.generate_choices({
+        "player_name": player.name,
+        "faction": player.faction,
+        "location": world.current_location,
+        "outcome": "started",
+        "narrative": narrative,
+    })
 
-    return StartResponse(session_id=sid, narrative=narrative)
+    # 6. Persist session (single call — includes choices)
+    sid = create_session(
+        player_state=player,
+        world_state=world,
+        last_choices=choices,
+    )
+
+    # Session has no slot yet at creation — set it in update_session and pass None here
+    sid = create_session(player_state=player, world_state=world, last_choices=choices)
+    append_message(sid, "system", f"[Game Started — Backstory parsed]\n{narrative}", save_slot=None)
+
+    return StartResponse(session_id=sid, narrative=narrative, choices=choices)
 
 
 @app.post("/game/action", response_model=ActionResponse)
@@ -248,11 +273,24 @@ async def game_action(req: ActionRequest):
             f"Score: {resolved['final_score']}, DC: {resolved['target_dc']}."
         )
 
-    # 5. Persist to SQLite (state mutations come from engine, never LLM)
+    # 5. Generate choices for next turn
+    action_snapshot = {
+        "location": world.current_location,
+        "turn": world.turn_count,
+        "player_name": player.name,
+        "faction": player.faction,
+        "motivation": player.motivation,
+        "outcome": resolved["outcome_level"],
+        "story_events": narrative[-500:],  # recent context for choices
+    }
+    choices = client.generate_choices(action_snapshot)
+
+    # 6. Persist to SQLite (state mutations come from engine, never LLM)
     update_session(
         session_id=sid,
         player_state=player,
         world_state=world,
+        last_choices=choices,
     )
     append_message(sid, "user", req.player_input)
     append_message(sid, "assistant", narrative)
@@ -271,6 +309,7 @@ async def game_action(req: ActionRequest):
         },
         updated_player_state=_dc_asdict(player),
         updated_world_state=_dc_asdict(world),
+        choices=choices,
     )
 
 
@@ -304,14 +343,16 @@ async def load_game(req: LoadRequest):
 
     player = _load_player(session_data["player_state"])
     world = _load_world(session_data["world_state"])
+    last_choices = session_data.get("last_choices", [])
 
     recent = fetch_messages(new_sid, limit=3)
-    return {
-        "session_id": new_sid,
-        "narrative_context": [m["content"] for m in recent],
-        "player_state": _dc_asdict(player),
-        "world_state": _dc_asdict(world),
-    }
+    return LoadResponse(
+        session_id=new_sid,
+        narrative_context=[m["content"] for m in recent],
+        player_state=_dc_asdict(player),
+        world_state=_dc_asdict(world),
+        choices=last_choices,
+    )
 
 
 # ---------------------------------------------------------------------------

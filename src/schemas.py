@@ -3,6 +3,14 @@ from typing import List, Optional, Dict, Any, Literal
 
 
 # ---------------------------------------------------------------------------
+# Choices schema — LLM returns a simple list of strings
+# ---------------------------------------------------------------------------
+
+class ChoicesResponse(BaseModel):
+    choices: list[str] = Field(min_length=3, max_length=4, description="3 to 4 suggested action phrases.")
+
+
+# ---------------------------------------------------------------------------
 # Character creation schemas (unchanged from original)
 # ---------------------------------------------------------------------------
 

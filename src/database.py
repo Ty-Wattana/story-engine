@@ -46,13 +46,25 @@ def _init_db(conn: sqlite3.Connection | None = None) -> None:
                 save_slot  TEXT,           -- nullable named save slot
                 player_state TEXT NOT NULL, -- JSON
                 world_state  TEXT NOT NULL, -- JSON
+                last_choices TEXT DEFAULT '[]',  -- JSON array of action choice strings
                 last_updated TEXT NOT NULL  -- ISO-8601 timestamp
             )
         """)
+        # Migration: add last_choices column to existing databases (no DROP COLUMN support)
+        try:
+            conn.execute("SELECT last_choices FROM game_sessions LIMIT 0")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE game_sessions ADD COLUMN last_choices TEXT DEFAULT '[]'")
+        # Migration: add save_slot column to message_history
+        try:
+            conn.execute("SELECT save_slot FROM message_history LIMIT 0")
+        except sqlite3.OperationalError:
+            conn.execute("ALTER TABLE message_history ADD COLUMN save_slot TEXT DEFAULT NULL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS message_history (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT    NOT NULL REFERENCES game_sessions(session_id),
+                save_slot  TEXT,           -- nullable: copied from parent session on load
                 role       TEXT    NOT NULL CHECK(role IN ('user', 'system', 'assistant')),
                 content    TEXT    NOT NULL
             )
@@ -77,6 +89,7 @@ def create_session(
     session_id: Optional[str] = None,
     player_state: Any = None,   # Pydantic model or dict
     world_state: Any = None,     # Pydantic model or dict
+    last_choices: Any = None,    # list of action choice strings
 ) -> str:
     """Create a new game session and persist initial state.
 
@@ -88,10 +101,11 @@ def create_session(
         now = datetime.now(timezone.utc).isoformat()
         pjson = _to_json(player_state)
         wjson = _to_json(world_state)
+        cjson = json.dumps(last_choices or [])
         conn.execute(
-            "INSERT INTO game_sessions (session_id, player_state, world_state, last_updated, save_slot) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (sid, pjson, wjson, now, None),
+            "INSERT INTO game_sessions (session_id, player_state, world_state, last_choices, last_updated, save_slot) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (sid, pjson, wjson, cjson, now, None),
         )
         conn.commit()
     finally:
@@ -104,6 +118,7 @@ def update_session(
     player_state: Any = None,
     world_state: Any = None,
     save_slot: Optional[str] = None,
+    last_choices: Any = None,   # list of action choice strings
 ) -> None:
     """Persist (possibly partially updated) state for a session."""
     conn = _get_conn()
@@ -120,6 +135,9 @@ def update_session(
         if save_slot is not None:
             cols.append("save_slot = ?")
             vals.append(save_slot)
+        if last_choices is not None:
+            cols.append("last_choices = ?")
+            vals.append(json.dumps(last_choices))
 
         cols.append("last_updated = ?")
         vals.append(datetime.now(timezone.utc).isoformat())
@@ -154,11 +172,13 @@ def fetch_session(session_id: str | None = None, save_slot: str | None = None) -
 
         player_state = _from_json(row["player_state"])
         world_state = _from_json(row["world_state"])
+        last_choices = json.loads(row["last_choices"]) if row["last_choices"] else []
         return {
             "session_id": row["session_id"],
             "save_slot": row["save_slot"],
             "player_state": player_state,
             "world_state": world_state,
+            "last_choices": last_choices,
             "last_updated": row["last_updated"],
         }
     finally:
@@ -178,7 +198,7 @@ def save_slot_name(session_id: str, slot_name: str) -> None:
         conn.close()
 
 
-def append_message(session_id: str, role: str, content: str) -> int:
+def append_message(session_id: str, role: str, content: str, save_slot: str | None = None) -> int:
     """Append a message to history. Returns the new row id."""
     # Enforce max 5 messages — delete oldest if at capacity
     conn = _get_conn()
@@ -198,8 +218,8 @@ def append_message(session_id: str, role: str, content: str) -> int:
             )
 
         cur = conn.execute(
-            "INSERT INTO message_history (session_id, role, content) VALUES (?, ?, ?)",
-            (session_id, role, content),
+            "INSERT INTO message_history (session_id, save_slot, role, content) VALUES (?, ?, ?, ?)",
+            (session_id, save_slot, role, content),
         )
         conn.commit()
         return cur.lastrowid
@@ -235,21 +255,23 @@ def duplicate_session(old_slot: str) -> str:
     try:
         # Insert new session row (don't preserve last_updated from original to avoid confusion)
         now = datetime.now(timezone.utc).isoformat()
+        last_choices = json.loads(src.get("last_choices", "[]")) if src.get("last_choices") else []
         conn.execute(
-            "INSERT INTO game_sessions (session_id, save_slot, player_state, world_state, last_updated) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (new_sid, None, _to_json(src["player_state"]), _to_json(src["world_state"]), now),
+            "INSERT INTO game_sessions (session_id, save_slot, player_state, world_state, last_choices, last_updated) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (new_sid, None, _to_json(src["player_state"]), _to_json(src["world_state"]), json.dumps(last_choices), now),
         )
 
-        # Copy message history
+        # Copy message history (carry forward save_slot from source session)
+        src_slot = src.get("save_slot")
         rows = conn.execute(
-            "SELECT role, content FROM message_history WHERE session_id = ? ORDER BY id",
+            "SELECT role, content, save_slot FROM message_history WHERE session_id = ? ORDER BY id",
             (src["session_id"],),
         ).fetchall()
         for r in rows:
             conn.execute(
-                "INSERT INTO message_history (session_id, role, content) VALUES (?, ?, ?)",
-                (new_sid, r["role"], r["content"]),
+                "INSERT INTO message_history (session_id, save_slot, role, content) VALUES (?, ?, ?, ?)",
+                (new_sid, src_slot, r["role"], r["content"]),
             )
         conn.commit()
     finally:
