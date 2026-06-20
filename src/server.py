@@ -341,11 +341,11 @@ async def load_game(req: LoadRequest):
     player = _load_player(session_data["player_state"])
     world = _load_world(session_data["world_state"])
 
-    # ponytail: no narrative context — next action generates fresh scene;
-    # copying history causes intro re-display alongside current-turn choices.
+    # Return last message as resume context (shows "where you left off")
+    recent = fetch_messages(sid, limit=1)
     return LoadResponse(
         session_id=sid,
-        narrative_context=[],
+        narrative_context=[m["content"] for m in recent],
         player_state=_dc_asdict(player),
         world_state=_dc_asdict(world),
         choices=session_data.get("last_choices", []),
