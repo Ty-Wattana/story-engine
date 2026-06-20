@@ -174,13 +174,16 @@ async def start_game(req: StartRequest):
     )
 
     # 5. Generate initial choices (lightweight context only)
-    choices = client.generate_choices({
-        "player_name": player.name,
-        "faction": player.faction,
-        "location": world.current_location,
-        "outcome": "started",
-        "narrative": narrative,
-    })
+    try:
+        choices = client.generate_choices({
+            "player_name": player.name,
+            "faction": player.faction,
+            "location": world.current_location,
+            "outcome": "started",
+            "narrative": narrative,
+        })
+    except Exception:
+        choices = []
 
     # 6. Persist session + intro message (single call)
     sid = create_session(
@@ -285,7 +288,10 @@ async def game_action(req: ActionRequest):
         "outcome": resolved["outcome_level"],
         "story_events": narrative[-500:],  # recent context for choices
     }
-    choices = client.generate_choices(action_snapshot)
+    try:
+        choices = client.generate_choices(action_snapshot)
+    except Exception:
+        choices = []
 
     # 6. Persist to SQLite (state mutations come from engine, never LLM)
     update_session(

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import List, Optional, Dict, Any, Literal
 
 
@@ -7,7 +7,20 @@ from typing import List, Optional, Dict, Any, Literal
 # ---------------------------------------------------------------------------
 
 class ChoicesResponse(BaseModel):
-    choices: list[str] = Field(min_length=1, max_length=4, description="1 to 4 suggested action phrases.")
+    """LLM output for choice generation.
+
+    Accepts both {"choices": [...]} (object) and bare [...] (array) formats
+    since different prompts/models produce different structures.
+    """
+    choices: list[str] = Field(default_factory=list, max_length=4, description="1 to 4 suggested action phrases.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_array(cls, data: Any) -> Any:
+        """Accept bare JSON arrays from LLM output and wrap them."""
+        if isinstance(data, list):
+            return {"choices": data}
+        return data
 
 
 # ---------------------------------------------------------------------------

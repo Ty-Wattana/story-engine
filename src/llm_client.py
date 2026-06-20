@@ -1,9 +1,12 @@
 import json
+import logging
 from pathlib import Path
 import ollama
 import re
 from pydantic import BaseModel
 from typing import Type, TypeVar, Any
+
+log = logging.getLogger(__name__)
 
 from src.schemas import ActionParseResult, ChoicesResponse
 
@@ -113,7 +116,7 @@ class LLMClient:
                     continue
 
         # All retries exhausted — LLM didn't produce valid extraction.
-        raise ValueError("LLM returned no parseable JSON after 3 attempts")
+        raise ValueError(f"LLM produced unparseable output after 3 attempts (last error: {last_exc})")
 
     def generate_flavor_text(self, context: str, instruction: str) -> str:
         """Standard text generation for narrative output."""
@@ -366,6 +369,7 @@ class LLMClient:
             )
             return result.choices
         except Exception as exc:
+            log.warning("choices generation failed, using procedural fallback: %s", exc)
             # Loop never dies — use procedural fallback instead of empty list.
             # Empty choices means nothing shown to player; fallback always gives options.
             loc = ctx.get("location", "the area")
