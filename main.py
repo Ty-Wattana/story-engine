@@ -19,7 +19,8 @@ import sys
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Prompt
+from rich.prompt import InvalidResponse, Prompt
+from rich.text import Text
 from rich.table import Table
 
 CONSOLE = Console()
@@ -28,6 +29,36 @@ BASE = "http://127.0.0.1:8000"
 # Escapes Rich markup characters in untrusted text (LPL/LLM output, user input).
 def _esc(s: str) -> str:
     return s.replace("[", "\\[").replace("]", "\\]")
+
+
+# ── Numeric-choice prompt — lets users type "1" instead of "1. Dialogue" ----
+
+_MENU_ORDER = ["0", "1", "2", "3", "4", "5"]  # display order: 0 last, numbered first
+
+
+class _MenuPrompt(Prompt):
+    """Rich Prompt that accepts single-digit input and maps to labeled choices."""
+
+    _labels: dict[str, str]  # e.g. {"1": "Dialogue", "2": "Interact", ...}
+
+    def pre_prompt(self) -> None:
+        labels = self._labels  # type: ignore[assignment]
+        if labels:
+            parts = [f"{k}. {labels[k]}" for k in _MENU_ORDER if k in labels]
+            display = "/".join(parts)
+            text = Text(f"[{display}]")
+            self.console.print(text, markup=False)
+
+    def process_response(self, value: str) -> str:
+        v = value.strip()
+        # Allow bare digit input → return just the key (matches downstream if/elif)
+        if v in self._labels:  # type: ignore[operator]
+            return v
+        # Also accept the full label text ("1. Dialogue") and strip to digit
+        for k in self._labels:  # type: ignore[operator]
+            if value.strip() == f"{k}. {self._labels[k]}":
+                return k
+        raise InvalidResponse("Please select a valid option")
 
 
 # ── Helpers ------------------------------------------------------------------
@@ -152,11 +183,13 @@ def _trigger_dialogue(session_id: str, player_data: dict, world_data: dict) -> d
     npc_name = npcs[int(npc_choice) - 1]
 
     # Check if there's conversation history to continue
-    choice = Prompt.ask(
+    choice_labels = {"1": "New greeting", "2": "Continue existing dialogue"}
+    choice = _MenuPrompt(
         "Start fresh or reply?",
-        choices=["1 (new greeting)", "2 (continue existing dialogue)"],
-        default="1",
+        choices=[f"{k} ({v})" for k, v in choice_labels.items()],
     )
+    choice._labels = choice_labels  # type: ignore[attr-defined]
+    choice = choice(default="1")
 
     player_msg = ""
     if choice == "2":
@@ -298,11 +331,16 @@ def main() -> None:
         CONSOLE.print()
         _render_state(pdata, wdata)
 
-        action = Prompt.ask(
+        trigger_labels = {
+            "1": "Dialogue", "2": "Interact", "3": "Combat Resolved",
+            "4": "Zone Transition", "5": "Save", "0": "Quit/Delete",
+        }
+        action = _MenuPrompt(
             "\n[dim]Engine trigger?[/]",
-            choices=["1. Dialogue", "2. Interact", "3. Combat Resolved", "4. Zone Transition", "5. Save", "0. Quit/Delete"],
-            default="1",
+            choices=[f"{k}. {v}" for k, v in trigger_labels.items()],
         )
+        action._labels = trigger_labels  # type: ignore[attr-defined]
+        action = action(default="1")
 
         if action == "1":
             resp = _trigger_dialogue(sid, pdata, wdata)
