@@ -1,4 +1,4 @@
-"""FastAPI server — stateless LLM + deterministic engine = HTTP API.
+"""FastAPI server — event-driven (CRPG backend) HTTP API.
 
 All game-logic lives in src.state; the LLM is a pure text-parser / flavor-generator.
 
@@ -26,15 +26,22 @@ from src.database import (
     duplicate_session,
     delete_session_by_slot,
 )
-from src.schemas import CharacterProfile, ActionParseResult
-from src.action_engine import resolve_action, apply_outcome_effects
+from src.schemas import (
+    CharacterProfile,
+    DialogueRequest,
+    DialogueResponse,
+    InteractRequest,
+    InteractResponse,
+    CombatResolvedRequest,
+    CombatResolvedResponse,
+)
 from src.llm_client import LLMClient
 
 # ---------------------------------------------------------------------------
-# FastAPI application & I/O schemas
+# FastAPI application & legacy I/O schemas (keep /game/start for bootstrap)
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Neuro-Symbolic RPG", version="0.2.0")
+app = FastAPI(title="Neuro-Symbolic RPG", version="0.3.0")
 
 
 class StartRequest(BaseModel):
@@ -45,20 +52,6 @@ class StartRequest(BaseModel):
 class StartResponse(BaseModel):
     session_id: str
     narrative: str
-    choices: list[str] = Field(default_factory=list, description="Suggested next actions for the player.")
-
-
-class ActionRequest(BaseModel):
-    session_id: str = Field(min_length=1)
-    player_input: str = Field(min_length=1, max_length=4096)
-
-
-class ActionResponse(BaseModel):
-    session_id: str
-    narrative: str
-    outcome: dict[str, Any]
-    updated_player_state: dict[str, Any]
-    updated_world_state: dict[str, Any]
     choices: list[str] = Field(default_factory=list, description="Suggested next actions for the player.")
 
 
@@ -93,15 +86,11 @@ def _dc_asdict(obj):
 
 
 def _load_player(pj) -> Player:
-    """Reconstruct a Player dataclass from JSON string or dict.
-
-    Accepts either a JSON string (from DB) or a dict (from direct API).
-    Handles both ``model_dump()``-style keys ("stats") and legacy snapshot-style keys ("stat.s").
-    """
+    """Reconstruct a Player dataclass from JSON string or dict."""
     if isinstance(pj, str):
         pdata = json.loads(pj)
     else:
-        pdata = dict(pj)  # shallow copy — preserve original
+        pdata = dict(pj)
 
     stats_raw = pdata.pop("stats", {})
     if isinstance(stats_raw, str):
@@ -134,21 +123,23 @@ def _load_world(wj) -> WorldState:
     )
 
 
+def _sanitized_state(player: Player, world: WorldState) -> dict[str, Any]:
+    """Return a minimal state snapshot for the thick client."""
+    return {
+        "player": _dc_asdict(player),
+        "world": _dc_asdict(world),
+    }
+
+
 # ---------------------------------------------------------------------------
-# Endpoints: Game
+# Endpoints: Bootstrap
 # ---------------------------------------------------------------------------
 
 @app.post("/game/start", response_model=StartResponse)
 async def start_game(req: StartRequest):
-    """Start a new campaign from backstory text.
-
-    Flow: LLM parses CharacterProfile (Pydantic validated) -> deterministic
-    Player/WorldState created by engine -> session persisted to SQLite ->
-    LLM generates intro narrative -> history message logged.
-    """
+    """Start a new campaign from backstory text."""
     client = LLMClient()
 
-    # 1. Parse backstory -> CharacterProfile
     system_prompt = client._load_system_prompt("prompts/character_creation.md")
     parsed = client.generate_structured(
         system_prompt=system_prompt,
@@ -156,7 +147,6 @@ async def start_game(req: StartRequest):
         schema=CharacterProfile,
     )
 
-    # 2. Build initial state (engine-driven, NOT LLM-predicted — golden rule)
     player = Player(
         name=req.player_name,
         faction=parsed.origin_faction,
@@ -166,14 +156,12 @@ async def start_game(req: StartRequest):
     )
     world = WorldState(current_location="The Void")
 
-    # 4. Intro narrative (LLM flavor only — never modifies state)
     intro_system = client._load_system_prompt("prompts/intro_scene.md")
     narrative = client.generate_flavor_text(
         context=f"Player: {player.name}, Faction: {player.faction}",
         instruction="Write an opening scene for the adventure.",
     )
 
-    # 5. Generate initial choices (lightweight context only)
     try:
         choices = client.generate_choices({
             "player_name": player.name,
@@ -185,139 +173,248 @@ async def start_game(req: StartRequest):
     except Exception:
         choices = []
 
-    # 6. Persist session + intro message (single call)
-    sid = create_session(
-        player_state=player,
-        world_state=world,
-        last_choices=choices,
-    )
+    sid = create_session(player_state=player, world_state=world, last_choices=choices)
     append_message(sid, "system", f"[Game Started — Backstory parsed]\n{narrative}", save_slot=None)
 
     return StartResponse(session_id=sid, narrative=narrative, choices=choices)
 
 
-@app.post("/game/action", response_model=ActionResponse)
-async def game_action(req: ActionRequest):
-    """Process a player action through the full neuro-symbolic pipeline."""
+# ---------------------------------------------------------------------------
+# Endpoints: Events (CRPG triggers)
+# ---------------------------------------------------------------------------
+
+@app.post("/event/dialogue", response_model=DialogueResponse)
+async def event_dialogue(req: DialogueRequest):
+    """Handle a dialogue event between the player and an NPC.
+
+    If player_message is empty, generate an opening greeting for the NPC.
+    Otherwise, determine the player's intent (persuade / intimidate / inquire)
+    and generate the NPC's response in character.
+    Always returns 3-4 follow-up dialogue choices.
+    """
     client = LLMClient()
 
-    # 1. Load session state from SQLite
-    sid = req.session_id
-    session_data = fetch_session(session_id=sid)
+    # 1. Load session state
+    session_data = fetch_session(session_id=req.session_id)
     if not session_data or "player_state" not in session_data:
-        raise HTTPException(404, f"No session found for '{sid}'")
+        raise HTTPException(404, f"No session found for '{req.session_id}'")
 
     player = _load_player(session_data["player_state"])
     world = _load_world(session_data["world_state"])
 
-    # 2. Load last 5 messages for conversational continuity (prevents LLM context overflow)
-    recent_messages = fetch_messages(sid, limit=5)
+    recent_messages = fetch_messages(req.session_id, limit=8)
 
-    # 3. Use symbolic engine (deterministic, NEVER the LLM) to parse intent + resolve mechanics.
-    snapshot_for_llm = {"location": world.current_location, "turn": world.turn_count}
+    # 2. Build NPC persona from active NPCs or generate on the fly
+    npc_persona = "a mysterious traveler"
+    for npc_name in world.active_npcs:
+        if npc_name.lower() == req.npc_name.lower():
+            npc_persona = f"{npc_name} (an NPC currently present in the area)"
+            break
 
-    parse_result: ActionParseResult | None = None
-    try:
-        parse_result = client.generate_action_result(req.player_input, snapshot_for_llm)
-    except Exception as exc:
-        raise HTTPException(502, f"Action intent parsing failed: {exc}")
-
-    # ---- Symbolic action resolution (STRICT golden rule — engine only) ----
-    target_stat_name = (
-        parse_result.modifiers.target_stat if parse_result.modifiers and parse_result.modifiers.target_stat  # type: ignore[union-attr]
-        else "dexterity"
-    )
-    stat_value = getattr(player.stats, target_stat_name, 10)
-
-    prof_bonus = StateManager(player, world).proficiency
-
-    action_type = parse_result.action_type
-    if hasattr(action_type, "value"):
-        action_type = action_type.value  # pydantic Literal[str] may be an Enum
-
-    resolved = resolve_action(
-        action_type=action_type,
-        stat_name=target_stat_name,
-        stat_value=stat_value,
-        proficiency=prof_bonus,
-        advantage=parse_result.modifiers.advantage if parse_result.modifiers else "none",
-        world_context=world.current_location,
-    )
-
-    state_manager = StateManager(player, world)
-    engine_effects = apply_outcome_effects(
-        state=state_manager,
-        outcome_level=resolved["outcome_level"],
-        action_type=action_type,
-    )
-
-    world.advance_turn()
-
-    # ---- LLM generates outcome narrative (stateless, read-only role) ----
-    narrative_prompt = (
-        f"Outcome: {resolved['outcome_level']} (success={resolved['success']}).\n"
-        f"Action: {parse_result.intent}\n"
-        f"d20 roll: dice={resolved['dice_roll']} + modifier({stat_value} +{prof_bonus}) = {resolved['final_score']} vs DC={resolved['target_dc']}\n"
-        f"Location: {world.current_location}, Turn: {world.turn_count}.\n"
-        f"Previous messages (max 5):\n"
-    )
-    for msg in recent_messages[:5]:
-        role_label = "You" if msg["role"] == "user" else ("DM" if msg["role"] == "system"
-                                                             else "Assistant")
-        narrative_prompt += f"<{role_label}>: {msg['content']}\n"
-
-    try:
-        narrative = client.generate_flavor_text(
-            context=narrative_prompt,
-            instruction="Write the outcome of this encounter.",
-        )
-    except Exception as narr_exc:
-        narrative = (
-            f"**Engine Result**: [{resolved['outcome_level'].upper()}] "
-            f"You {parse_result.intent}. Roll: {resolved['dice_roll']}, "
-            f"Score: {resolved['final_score']}, DC: {resolved['target_dc']}."
-        )
-
-    # 5. Generate choices for next turn
-    action_snapshot = {
+    context_block = {
+        "player_name": player.name,
+        "player_faction": player.faction,
+        "player_motivation": player.motivation,
         "location": world.current_location,
         "turn": world.turn_count,
-        "player_name": player.name,
-        "faction": player.faction,
-        "motivation": player.motivation,
-        "outcome": resolved["outcome_level"],
-        "story_events": narrative[-500:],  # recent context for choices
     }
-    try:
-        choices = client.generate_choices(action_snapshot)
-    except Exception:
-        choices = []
 
-    # 6. Persist to SQLite (state mutations come from engine, never LLM)
+    # 3. Generate NPC dialogue
+    dialogue_context = (
+        f"Player: {player.name}, Faction: {player.faction}, Motivation: {player.motivation}\n"
+        f"Location: {world.current_location}, Turn: {world.turn_count}\n"
+        f"You are playing the role of: {npc_persona}\n\n"
+    )
+
+    if not req.player_message:
+        # NPC initiates — generate greeting
+        dialogue_context += "You are initiating this conversation. Generate an opening line."
+        system_prompt = client._load_system_prompt("prompts/turn_scene.md")
+        npc_response = client.generate_flavor_text(
+            context=dialogue_context,
+            instruction=f"Speak your opening line to {player.name}. Stay in character.",
+        )
+    else:
+        # Player responds — determine intent and generate NPC reply
+        dialogue_context += (
+            f"Previous conversation history:\n"
+        )
+        for msg in recent_messages[-6:]:
+            role = "Player" if msg["role"] == "user" else ("DM/NPC" if msg["role"] == "system" else msg["role"])
+            dialogue_context += f"  <{role}>: {msg['content']}\n"
+
+        dialogue_context += f"\nYour turn to reply as {req.npc_name}.\n"
+        dialogue_context += f"Player said: {req.player_message!r}\n"
+
+        # Try intent classification via LLM structured output
+        intent = "general"  # default fallback
+        try:
+            intent_prompt = (
+                f"Analyze the following player utterance and classify its intent.\n\n"
+                f"{dialogue_context}\n\n"
+                f"Reply with ONLY one word: persuade, intimidate, inquire, threaten, or general."
+            )
+            intent_text = client.generate_flavor_text(context=intent_prompt, instruction="Single word.")
+            intent = intent_text.strip().lower().split()[0] if intent_text.strip() else "general"
+        except Exception:
+            pass  # default to generic response
+
+        dialogue_system = client._load_system_prompt("prompts/turn_scene.md")
+        npc_response = client.generate_flavor_text(
+            context=dialogue_context,
+            instruction=(
+                f"Reply as {req.npc_name}. The player's tone was '{intent}'. "
+                f"Respond naturally in character."
+            ),
+        )
+
+    # 4. Generate dialogue choices for the player's next reply
+    try:
+        choice_ctx = {
+            "player_name": player.name,
+            "npc_name": req.npc_name,
+            "location": world.current_location,
+            "last_message": npc_response[:200],
+            "turn": world.turn_count,
+        }
+        choices_text = (
+            f"Player: {choice_ctx['player_name']}\n"
+            f"NPC: {req.npc_name}\n"
+            f"Location: {choice_ctx['location']}\n"
+            f"Last NPC line: {choice_ctx['last_message']}\n\n"
+            "Generate 3-4 conversational follow-up choices for the player. "
+            "Each should be a short quoted reply (like something you'd say to this NPC). "
+            "Vary them: one polite, one bold/aggressive, one inquisitive."
+        )
+        choices = client.generate_structured(
+            system_prompt=client.choice_prompt,
+            user_prompt=choices_text,
+            schema=ChoicesResponse,
+        ).choices
+    except Exception as exc:
+        client.logger.warning("dialogue choices generation failed: %s", exc) if hasattr(client, 'logger') else None
+        choices = [
+            f"Tell me more about yourself",
+            f"What do you know about {world.current_location}?",
+            f"I need your help with something.",
+            "Leave quietly",
+        ]
+
+    # 5. Persist conversation turn
+    append_message(req.session_id, "system", f"[Dialogue with {req.npc_name} — NPC]\n{npc_response}")
+    append_message(req.session_id, "user", req.player_message if req.player_message else f"[Initiated dialogue with {req.npc_name}]")
     update_session(
-        session_id=sid,
+        session_id=req.session_id,
         player_state=player,
         world_state=world,
         last_choices=choices,
     )
-    append_message(sid, "user", req.player_input)
-    append_message(sid, "assistant", narrative)
 
-    return ActionResponse(
-        session_id=sid,
-        narrative=narrative,
-        outcome={
-            "dice_roll": resolved["dice_roll"],
-            "modifier": resolved["modifier"],
-            "final_score": resolved["final_score"],
-            "target_dc": resolved["target_dc"],
-            "outcome_level": resolved["outcome_level"],
-            "success": resolved["success"],
-            "effects_applied": engine_effects or {},
-        },
-        updated_player_state=_dc_asdict(player),
-        updated_world_state=_dc_asdict(world),
-        choices=choices,
+    return DialogueResponse(
+        session_id=req.session_id,
+        npc_response=npc_response,
+        dialogue_choices=choices,
+        updated_state=_sanitized_state(player, world),
+    )
+
+
+@app.post("/event/interact", response_model=InteractResponse)
+async def event_interact(req: InteractRequest):
+    """Generate flavor text for a player interacting with an object in the world."""
+    client = LLMClient()
+
+    # 1. Load session state
+    session_data = fetch_session(session_id=req.session_id)
+    if not session_data or "player_state" not in session_data:
+        raise HTTPException(404, f"No session found for '{req.session_id}'")
+
+    player = _load_player(session_data["player_state"])
+    world = _load_world(session_data["world_state"])
+
+    # 2. Generate interaction flavor text
+    context = (
+        f"Location: {world.current_location}\n"
+        f"Turn: {world.turn_count}\n"
+        f"Player inventory: {', '.join(player.inventory[:5])}{'...' if len(player.inventory) > 5 else ''}\n"
+        f"The player interacts with the object: '{req.target_object}'.\n"
+        f"Describe what they see, feel, or discover. Keep it atmospheric and concise."
+    )
+
+    try:
+        narrative = client.generate_flavor_text(
+            context=context,
+            instruction="Describe the interaction result vividly.",
+        )
+    except Exception as exc:
+        client.logger.warning("interact flavor failed: %s", exc) if hasattr(client, 'logger') else None
+        narrative = f"You examine '{req.target_object}'. Nothing happens — or does it?"
+
+    # 3. Persist
+    append_message(req.session_id, "system", f"[Interacted with {req.target_object}]\n{narrative}")
+    update_session(
+        session_id=req.session_id,
+        player_state=player,
+        world_state=world,
+        last_choices=[],
+    )
+
+    return InteractResponse(
+        session_id=req.session_id,
+        narrative_description=narrative,
+        updated_state=_sanitized_state(player, world),
+    )
+
+
+@app.post("/event/combat_resolved", response_model=CombatResolvedResponse)
+async def event_combat_resolved(req: CombatResolvedRequest):
+    """Process post-combat: advance turn count, generate summary, update state."""
+    client = LLMClient()
+
+    # 1. Load session state
+    session_data = fetch_session(session_id=req.session_id)
+    if not session_data or "player_state" not in session_data:
+        raise HTTPException(404, f"No session found for '{req.session_id}'")
+
+    player = _load_player(session_data["player_state"])
+    world = _load_world(session_data["world_state"])
+
+    # 2. Advance turn count
+    world.advance_turn()
+
+    # 3. Generate post-combat summary
+    context = (
+        f"Victor: {req.victor}\n"
+        f"Defeated enemies: {', '.join(req.defeated_enemies) if req.defeated_enemies else 'none listed'}\n"
+        f"Location: {world.current_location}\n"
+        f"Turn: {world.turn_count}\n"
+        f"Generate a brief (2-3 sentence) post-combat atmospheric summary. "
+        f"The dust settles mood — describe the aftermath."
+    )
+
+    try:
+        summary = client.generate_flavor_text(context=context, instruction="Post-combat summary.")
+    except Exception as exc:
+        client.logger.warning("combat summary failed: %s", exc) if hasattr(client, 'logger') else None
+        defeated_str = ", ".join(req.defeated_enemies) if req.defeated_enemies else "enemies"
+        summary = f"The dust settles. {req.victor} stands victorious over the fallen {defeated_str}."
+
+    # 4. Persist
+    append_message(
+        req.session_id,
+        "system",
+        f"[Combat Resolved — Victor: {req.victor}, Defeated: {', '.join(req.defeated_enemies)}]\n{summary}",
+    )
+    update_session(
+        session_id=req.session_id,
+        player_state=player,
+        world_state=world,
+        last_choices=[],
+    )
+
+    return CombatResolvedResponse(
+        session_id=req.session_id,
+        narrative_summary=summary,
+        updated_state=_sanitized_state(player, world),
     )
 
 
@@ -352,7 +449,6 @@ async def load_game(req: LoadRequest):
     player = _load_player(session_data["player_state"])
     world = _load_world(session_data["world_state"])
 
-    # Return last message as resume context (shows "where you left off")
     recent = fetch_messages(sid, limit=1)
     return LoadResponse(
         session_id=sid,
@@ -376,9 +472,9 @@ async def delete_game(req: DeleteRequest):
 
 
 # ---------------------------------------------------------------------------
-# Health-check (monitoring / smoke tests)
+# Health-check
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
 async def health():
-    return {"status": "running", "version": "0.2.0"}
+    return {"status": "running", "version": "0.3.0"}

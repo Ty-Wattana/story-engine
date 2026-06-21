@@ -1,14 +1,24 @@
+"""LLM client — Ollama wrapper for narrative and intent generation.
+
+MUD-style action parsing removed (Step 1/3). New event methods:
+- generate_npc_dialogue      (in-character NPC response)
+- classify_dialogue_intent   (persuade / intimidate / inquire / threaten / general)
+"""
+
+from __future__ import annotations
+
 import json
 import logging
-from pathlib import Path
-import ollama
 import re
-from pydantic import BaseModel
-from typing import Type, TypeVar, Any
+from pathlib import Path
+from typing import Any, TypeVar
+
+import ollama
+from pydantic import BaseModel, Field, model_validator
+
+from src.schemas import ChoicesResponse
 
 log = logging.getLogger(__name__)
-
-from src.schemas import ActionParseResult, ChoicesResponse
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -21,18 +31,13 @@ class LLMClient:
     # Prompt loading (reads from prompts/ at repo root)
     # ------------------------------------------------------------------
 
-    def _load_system_prompt(self, prompt_file: str = "prompts/character_creation.md") -> str:
+    def _load_system_prompt(self, prompt_file: str = "prompts/intro_scene.md") -> str:
         """Load a system prompt from the prompts/ directory (repo root)."""
-        # prompts/ is at repo root; llm_client.py lives under src/, so go up one level
         base = Path(__file__).resolve().parent.parent
         path = base / prompt_file
         if not path.exists():
             return ""
         return path.read_text(encoding="utf-8").strip()
-
-    @property
-    def action_prompt(self) -> str:
-        return self._load_system_prompt("prompts/action.md")
 
     @property
     def choice_prompt(self) -> str:
@@ -43,39 +48,15 @@ class LLMClient:
         return self._load_system_prompt("prompts/flavor_text.md")
 
     @property
-    def scene_prompt(self) -> str:
-        return self._load_system_prompt("prompts/scene_description.md")
-
-    @property
     def intro_prompt(self) -> str:
         return self._load_system_prompt("prompts/intro_scene.md")
-
-    @property
-    def outcome_prompt(self) -> str:
-        return self._load_system_prompt("prompts/outcome_narration.md")
-
-    @property
-    def turn_scene_prompt(self) -> str:
-        return self._load_system_prompt("prompts/turn_scene.md")
-
-    @property
-    def lore_validation_prompt(self) -> str:
-        return self._load_system_prompt("prompts/lore_validation.md")
-
-    @property
-    def backstory_revision_template(self) -> str:
-        return self._load_system_prompt("prompts/backstory_revision.md")
 
     # ------------------------------------------------------------------
     # Structured generation (Pydantic-validated JSON)
     # ------------------------------------------------------------------
 
-    def generate_structured(self, system_prompt: str, user_prompt: str, schema: Type[T], *, retries: int = 3) -> T:
-        """Forces the LLM to return JSON matching the Pydantic schema.
-
-        Handles common LLM quirks (markdown fences, conversational text) by
-        extracting embedded JSON and retrying on validation failure.
-        """
+    def generate_structured(self, system_prompt: str, user_prompt: str, schema: type[T], *, retries: int = 3) -> T:
+        """Forces the LLM to return JSON matching the Pydantic schema."""
         last_exc: Exception | None = None
 
         for attempt in range(retries):
@@ -90,33 +71,30 @@ class LLMClient:
 
             text = response['message']['content']
 
-            # 1. Strip markdown fences (````json` or ```) if present
             cleaned = self._extract_json_text(text)
             if cleaned is not None:
-                parsed = schema.model_validate_json(cleaned)
-                if self._looks_valid(parsed, schema):
+                try:
+                    parsed = schema.model_validate_json(cleaned)
                     return parsed
+                except Exception as exc:
+                    last_exc = exc
 
-            # 2. Try the raw text as-is (LLM sometimes returns bare JSON)
             try:
                 parsed = schema.model_validate_json(text.strip())
-                if self._looks_valid(parsed, schema):
-                    return parsed
+                return parsed
             except Exception as raw_exc:
                 last_exc = raw_exc
                 continue
 
-            # 3. Try to find and extract a JSON object from the text
             extracted = self._extract_json_from_text(text)
             if extracted is not None:
                 try:
                     parsed = schema.model_validate_json(extracted)
-                    return parsed  # Pydantic already validates structure — no heuristic needed
+                    return parsed
                 except Exception:
                     continue
 
-        # All retries exhausted — LLM didn't produce valid extraction.
-        raise ValueError(f"LLM produced unparseable output after 3 attempts (last error: {last_exc})")
+        raise ValueError(f"LLM produced unparseable output after {retries} attempts (last error: {last_exc})")
 
     def generate_flavor_text(self, context: str, instruction: str) -> str:
         """Standard text generation for narrative output."""
@@ -129,31 +107,23 @@ class LLMClient:
         )
         result = response['message']['content'].strip()
 
-        # Strip any remaining meta-commentary (defense-in-depth)
+        # Strip meta-commentary (defense-in-depth)
         for marker in ("Here is", "I will", "Let me", "*thinks*", "Thinking:", "Step 1", "Okay,", "Alright,"):
             if result.lower().startswith(marker.lower()):
                 result = self._trim_meta(result)
                 break
 
-        # Detect mid-text revision cycles: the LLM "shows its work" by outputting
-        # draft text, then meta-commentary (e.g. '" -> Wait, I shouldn't...'),
-        # then repeats with another draft, and finally emits a clean version at
-        # the end.  Extract only that final clean block.
+        # Detect mid-text revision cycles
         result = self._extract_final_draft(result)
 
         return result or "(nothing happens)"
 
     # ------------------------------------------------------------------
-    # JSON extraction helpers — handle LLM quirks with markdown fences,
-    # conversational text, and embedded objects
+    # JSON extraction helpers — handle LLM quirks
     # ------------------------------------------------------------------
 
     @staticmethod
     def _extract_json_text(text: str) -> str | None:
-        """Strip ```json or ``` fences from the edges of a response.
-
-        Returns the cleaned interior if fences are found, else None.
-        """
         m = re.search(r'```(?:json)?\s*([\[\s\S]*?)\s*```', text)
         if m:
             return m.group(1).strip()
@@ -161,11 +131,6 @@ class LLMClient:
 
     @staticmethod
     def _extract_json_from_text(text: str) -> str | None:
-        """Find and extract a JSON object from arbitrary text.
-
-        Looks for the first '{' … matching '}' pair, handling nesting.
-        Returns the extracted JSON string if found, else None.
-        """
         depth = 0
         start = None
         for i, ch in enumerate(text):
@@ -180,67 +145,26 @@ class LLMClient:
         return None
 
     @staticmethod
-    def _looks_valid(parsed: Any, schema: Type[BaseModel]) -> bool:
-        """Accept if Pydantic already validated — the heuristic was false-positive prone.
-
-        Kept only for origin_faction anti-hallucination (model echoing prompt examples).
-        """
-        if isinstance(parsed, BaseModel):
-            obj = parsed
-        else:
-            try:
-                obj = schema.model_validate(parsed)
-            except Exception:
-                return False
-
-        faction = obj.__dict__.get("origin_faction", "")
-        if isinstance(faction, str):
-            ai_defaults = {"assistant", "ai", "llm", "model", "chatbot", "bot", "system"}
-            if faction.strip().lower() in ai_defaults:
-                return False
-        # Known extraction defaults — reject only when ALL three match.
-        _EXTRACTION_DEFAULTS = {"Wanderer", "Discovery", "Forge your own path"}
-        vals = {f: str(obj.__dict__.get(f, "")) for f in ("origin_faction", "motivation", "goal")}
-        if all(vals[f] in _EXTRACTION_DEFAULTS for f in vals):
-            return False
-        return True
-
-    @staticmethod
     def _trim_meta(text: str) -> str:
         """Remove leading meta-commentary and return only the narrative."""
         for sep in ("The ", "A ", "In ", "On ", "Under ", "Over ", "Through "):
             if text.startswith(sep):
                 break
-        # Try to find first sentence-ending period that looks like actual narrative
         parts = text.split(". ")
-        # Skip the first 1-2 segments if they look like meta-commentary (too short)
         skip = 0
         for i, part in enumerate(parts[:-1]):
-            if len(part.strip()) > 8:  # meta-phrases are typically short
+            if len(part.strip()) > 8:
                 break
             skip = i + 1
         rest = parts[skip:]
-        # Combine until we get something reasonable
         combined = ". ".join(rest)
         return (combined + ".").strip() or "(nothing happens)"
 
     @staticmethod
     def _extract_final_draft(text: str) -> str:
-        """Extract clean output from LLM self-correction / draft-revision cycles.
-
-        Some models output internal monologue like:
-
-            "Some draft text." -> Wait, I shouldn't do that...
-            Revised text here. -> Let me fix the quotes.
-            Okay, final version:
-            The actual clean output.
-
-        Returns only the final narrative block, discarding all intermediate drafts
-        and commentary.
-        """
+        """Extract clean output from LLM self-correction / draft-revision cycles."""
         lines = text.split('\n')
 
-        # --- Pass 1: explicit revision markers (e.g. "Okay, final version:", "Revised text:") ---
         MARKER_PATTERNS = [
             r"(?i)^ok[a-z]*\s*,?\s*(alright\s+)?(?:final\s+)?(?:version|ver)\w*\b",
             r"(?i)^revised\s+text\b",
@@ -251,35 +175,28 @@ class LLMClient:
         for i, line in enumerate(lines):
             for pat in MARKER_PATTERNS:
                 if re.search(pat, line):
-                    # Content after the marker is candidate text
                     candidate = '\n'.join(lines[i + 1:]).strip()
                     if candidate and len(candidate) > 3:
                         return candidate
 
-        # Also handle "I will write:" or "Here goes:" type markers that _trim_meta might miss
         for i, line in enumerate(lines):
             if re.search(r'(?i)^you\'?ll?\s+get\s+:|^(?:I\s+)?(?:will|got)\s+(?:write|output|text):\s*$', line):
                 candidate = '\n'.join(lines[i + 1:]).strip()
                 if candidate and len(candidate) > 3:
                     return candidate
 
-        # --- Pass 2: "draft -> commentary" pattern — take content after last meta line ---
-        # Meta lines: contain '" ->' followed by thinking-like words (wait, I need, let me, etc.)
         LAST_META_RE = re.compile(r'"[^\n]*\s*->\s*(wait|I\s|let\s|oh\s|hmm|right|nope|sorry|ah )', re.IGNORECASE)
         last_meta_end = 0
         for i, line in enumerate(lines):
             if LAST_META_RE.search(line):
-                # Find start of next non-empty line after this meta line
                 for j in range(i + 1, len(lines)):
                     if lines[j].strip():
                         candidate = '\n'.join(lines[j:]).strip()
                         last_meta_end = j
                         break
-                # Don't return yet — keep looking for deeper meta lines
 
         if last_meta_end > 0:
             candidate = '\n'.join(lines[last_meta_end:]).strip()
-            # Strip trailing '" -> ...' fragments that follow the narrative itself
             for trim in ('" ->', '" ->\n', ' -> ', '.\" ->'):
                 idx = candidate.find(trim)
                 if idx != -1:
@@ -288,14 +205,11 @@ class LLMClient:
             if candidate and len(candidate) > 3:
                 return candidate
 
-        # --- Pass 3: "block-level" heuristic — find paragraphs separated by meta commentary. ---
-        # Split on blank lines; skip commentary blocks; take the longest non-commentary block.
         blocks = [b.strip() for b in re.split(r'\n\s*\n', text) if b.strip()]
         if len(blocks) >= 2:
             best = None
             best_len = 0
             for block in reversed(blocks):
-                # Skip commentary blocks (contain -> with thinking words)
                 if LAST_META_RE.search(block):
                     continue
                 words = len(block.split())
@@ -310,45 +224,73 @@ class LLMClient:
         return text
 
     # ------------------------------------------------------------------
-    # Action-loop endpoints (Phase 4 additions)
+    # Event-driven methods (Step 3)
     # ------------------------------------------------------------------
 
-    def generate_action_result(self, user_input: str, state_context: dict) -> ActionParseResult:
-        """Parse free-text player input into a structured ActionParseResult.
+    def generate_npc_dialogue(self, npc_name: str, npc_persona: str, context: str, instruction: str) -> str:
+        """Generate in-character dialogue for a specific NPC.
 
-        The LLM only answers *what* the player tried to do — not what happens.
-        Outcome effects are determined by the engine from deterministic rules.
-
-        Args:
-            user_input: exact text the player typed or selected
-            state_context: snapshot dict from StateManager.snapshot() containing
-                           player info, inventory, locations, etc. May also contain
-                           ``story_events`` (str) for disambiguation against recent events.
-        Returns:
-            Validated ActionParseResult via Pydantic schema enforcement.
+        The system prompt instructs the model to fully roleplay as the named NPC.
+        This is the primary method used by /event/dialogue for NPC replies.
         """
-        context_block = json.dumps(state_context, indent=2)
-        story = state_context.get("story_events", "")
-        prompt = f"Current game state:\n{context_block}"
-        if story:
-            prompt += f"\n\n{story}"
-        prompt += f"\n\nPlayer input: {user_input!r}\n\nParse this action into structured mechanics."
+        persona_text = f"\n\nYou are roleplaying as: {npc_name}. " \
+                       f"Persona: {npc_persona}. " \
+                       f"Stay in character at all times — speak, think, and react exactly as they would."
 
-        return self.generate_structured(
-            system_prompt=self.action_prompt,
-            user_prompt=prompt,
-            schema=ActionParseResult,
+        system_prompt = self._load_system_prompt("prompts/turn_scene.md") + persona_text
+        return self.generate_flavor_text(context=context, instruction=instruction)
+
+    def classify_dialogue_intent(self, conversation_history: str) -> str:
+        """Classify the player's latest message intent.
+
+        Returns one of: persuade, intimidate, inquire, threaten, general.
+        Falls back to 'general' on any error.
+        """
+        prompt = (
+            f"Read this conversation history and classify the PLAYER'S LAST message.\n\n"
+            f"{conversation_history}\n\n"
+            f"Reply with ONLY one word: persuade, intimidate, inquire, threaten, or general."
         )
+        try:
+            text = self.generate_flavor_text(context=prompt, instruction="Single word.").strip()
+            return text.split()[0].lower() if text else "general"
+        except Exception as exc:
+            log.warning("intent classification failed: %s", exc)
+            return "general"
+
+    def generate_dialogue_choices(self, player_name: str, npc_name: str, location: str, last_npc_line: str) -> list[str]:
+        """Generate 3-4 conversational follow-up choices for the player."""
+        context_text = (
+            f"Player: {player_name}\n"
+            f"NPC: {npc_name}\n"
+            f"Location: {location}\n"
+            f"Last NPC line: {last_npc_line[:200]}\n\n"
+            "Generate 3-4 conversational follow-up choices for the player. "
+            "Each should be a short quoted reply (something you'd say to this NPC). "
+            "Vary them: one polite, one bold/aggressive, one inquisitive."
+        )
+
+        try:
+            result = self.generate_structured(
+                system_prompt=self.choice_prompt,
+                user_prompt=context_text,
+                schema=ChoicesResponse,
+            )
+            return result.choices
+        except Exception as exc:
+            log.warning("dialogue choices generation failed: %s", exc)
+            return [
+                "Tell me more about yourself",
+                f"What do you know about {location}?",
+                "I need your help with something.",
+                "Leave quietly",
+            ]
 
     def generate_choices(self, ctx: dict) -> list[str]:
         """Generate in-world DM choice options for the player.
 
-        Uses a lightweight summary of state (not full JSON dump) to keep
-        Ollama input tokens low — choices only need location + outcome context.
-        Falls back to procedural choices when LLM is unavailable.
+        Kept for /game/start bootstrap compatibility. Procedural fallback on failure.
         """
-        # Lightweight summary instead of json.dumps(state_context) which dumps
-        # the full Pydantic dataclass as nested JSON (huge token count).
         parts = []
         for key in ("player_name", "faction", "motivation", "location", "turn"):
             val = ctx.get(key)
@@ -358,7 +300,7 @@ class LLMClient:
             parts.append(f"last_outcome: {outcome}")
         story = ctx.get("story_events") or ctx.get("narrative", "")
         if story:
-            parts.append(f"recent: {story[-300:]}")  # last 300 chars only
+            parts.append(f"recent: {story[-300:]}")
         context_text = "\n".join(parts) + "\n\nGenerate action options."
 
         try:
@@ -370,8 +312,6 @@ class LLMClient:
             return result.choices
         except Exception as exc:
             log.warning("choices generation failed, using procedural fallback: %s", exc)
-            # Loop never dies — use procedural fallback instead of empty list.
-            # Empty choices means nothing shown to player; fallback always gives options.
             loc = ctx.get("location", "the area")
             return [
                 f"Examine the area around you",

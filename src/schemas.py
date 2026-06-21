@@ -1,30 +1,34 @@
+"""Pydantic schemas for the Event-Driven (CRPG) architecture.
+
+Old MUD-style schemas (ActionRequest, ActionParseResult, etc.) removed.
+New schemas model discrete game events: dialogue, object interaction, combat resolution.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
 from pydantic import BaseModel, Field, model_validator
-from typing import List, Optional, Dict, Any, Literal
 
 
 # ---------------------------------------------------------------------------
-# Choices schema — LLM returns a simple list of strings
+# Legacy helpers (still used by /game/start bootstrap)
 # ---------------------------------------------------------------------------
 
 class ChoicesResponse(BaseModel):
-    """LLM output for choice generation.
-
-    Accepts both {"choices": [...]} (object) and bare [...] (array) formats
-    since different prompts/models produce different structures.
-    """
-    choices: list[str] = Field(default_factory=list, max_length=4, description="1 to 4 suggested action phrases.")
+    """LLM output for choice generation — kept for /game/start compatibility."""
+    choices: list[str] = Field(default_factory=list, max_length=4)
 
     @model_validator(mode="before")
     @classmethod
     def coerce_array(cls, data: Any) -> Any:
-        """Accept bare JSON arrays from LLM output and wrap them."""
         if isinstance(data, list):
             return {"choices": data}
         return data
 
 
 # ---------------------------------------------------------------------------
-# Character creation schemas (unchanged from original)
+# Character creation (unchanged — still used by /game/start)
 # ---------------------------------------------------------------------------
 
 class CharacterProfile(BaseModel):
@@ -34,82 +38,47 @@ class CharacterProfile(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Action input schemas — what the LLM extracts from free-text
+# Event schemas — thick-client triggers
 # ---------------------------------------------------------------------------
 
-class ActionModifiers(BaseModel):
-    """Extra context about how the action is performed."""
-    target_stat: Optional[str] = Field(None, description="Which player stat governs this action (e.g. 'strength', 'dexterity').")
-    tool_used: Optional[str] = Field(None, description="Weapon, tool, or item being wielded for this action.")
-    advantage: Literal["none", "advantage", "disadvantage"] = Field("none", description="advantage, disadvantage, or normal.")
+class DialogueRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    npc_name: str = Field(min_length=1, description="Which NPC is in this dialogue.")
+    player_message: str = Field(default="", description="Player's reply. Empty if NPC initiates greeting.")
 
 
-class ActionParseResult(BaseModel):
-    """Structured interpretation of user free-text input.
-
-    The LLM only answers *what* the player tried — not what happens.
-    Outcome effects are determined by the engine from deterministic rules.
-    """
-
-    intent: str = Field(description="A 1-3 word summary of the action.")
-    target_entity: Optional[str] = Field(None, description="The NPC, item, or location targeted by the action.")
-    is_combat: bool = Field(False, description="True if the action involves physical violence or hostile magic.")
-
-    # Expanded fields (Phase 1 additions)
-    action_type: Literal["combat", "stealth", "social", "exploration", "item"] = Field(
-        description="The category this action falls under."
-    )
-    verb: str = Field(description="The dominant action verb extracted from the user input (e.g. 'sneak', 'attack', 'persuade').")
-    modifiers: ActionModifiers = Field(
-        default_factory=ActionModifiers,
-        description="Additional mechanical context for resolving this action."
-    )
-    raw_input: str = Field(description="The exact original text the player typed or selected.")
-
-
-# ---------------------------------------------------------------------------
-# Action resolution schemas — what the engine produces per outcome level
-# ---------------------------------------------------------------------------
-
-OutcomeLevel = Literal["crit_fresh", "failure", "partial", "success", "crit"]
-
-
-class OutcomeEffect(BaseModel):
-    """A single state-mutation effect applied by the engine."""
-    key: str = Field(description="Effect key in entity.field.operator form. Examples: 'player.inventory.add', 'world.health.decrement'.")
-    value: Any = Field(description="The value to apply.")
-
-
-class ActionResult(BaseModel):
-    """Outcome of resolving an action through the action engine."""
-
-    intent: str = Field(description="What the player attempted.")
-    verb: str = Field(description="The dominant action verb.")
-    target_entity: Optional[str] = Field(None, description="Target of the action (None if none).")
-
-    dice_roll: int = Field(description="The raw d20 roll value.")
-    modifier: int = Field(description="Stat + proficiency + tool modifiers applied to the roll.")
-    final_score: int = Field(description="dice_roll + modifier — compared against the Difficulty Class.")
-    target_dc: int = Field(description="The Difficulty Class this action needed to meet or exceed.")
-    advantage: str = Field(description="advantage / disadvantage / none context for this roll.")
-
-    outcome_level: OutcomeLevel = Field(
-        description=(
-            "crit_fresh — rolled a 20 (automatically succeed, bonus effect)\n"
-            "failure  — rolled a 1  (automatically fail, penalty applied)\n"
-            "partial  — within 5 of meeting the DC\n"
-            "success  — met or exceeded the DC\n"
-            "crit     — exceeded the DC by 10 or more"
-        )
-    )
-
-    success: bool = Field(description="Whether the target DC was met or exceeded.")
-
-    effects: list[OutcomeEffect] = Field(
+class DialogueResponse(BaseModel):
+    session_id: str
+    npc_response: str = Field(description="The NPC's full spoken response.")
+    dialogue_choices: list[str] = Field(
         default_factory=list,
-        description="Engine-computed state changes applied to the world. Empty only when nothing changes."
+        max_length=4,
+        description="Options presented to the player as follow-up replies.",
+    )
+    updated_state: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Sanitized player + world state snapshot for the client.",
     )
 
-    narrative_prompt: str = Field(
-        description="Plain-text instructions for the narrative engine to generate flavor text."
-    )
+
+class InteractRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    target_object: str = Field(min_length=1, max_length=256, description="What the player is interacting with (e.g. 'Strange Monolith').")
+
+
+class InteractResponse(BaseModel):
+    session_id: str
+    narrative_description: str = Field(description="Flavor text describing the interaction result.")
+    updated_state: dict[str, Any] = Field(default_factory=dict)
+
+
+class CombatResolvedRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    victor: str = Field(description="Who won — player name or faction string.")
+    defeated_enemies: list[str] = Field(default_factory=list, description="Names of the defeated opponents.")
+
+
+class CombatResolvedResponse(BaseModel):
+    session_id: str
+    narrative_summary: str = Field(description="Post-combat atmospheric summary.")
+    updated_state: dict[str, Any] = Field(default_factory=dict)
