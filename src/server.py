@@ -35,7 +35,11 @@ from src.schemas import (
     CombatResolvedResponse,
 )
 from src.llm_client import LLMClient
-from src.schemas import ChoicesResponse
+from src.schemas import ChoicesResponse, IntentClassification
+from src.action_engine import resolve_action
+import logging
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # FastAPI application & legacy I/O schemas (keep /game/start for bootstrap)
@@ -198,16 +202,15 @@ async def start_game(req: StartRequest):
 
 @app.post("/event/dialogue", response_model=DialogueResponse)
 async def event_dialogue(req: DialogueRequest):
-    """Handle a dialogue event between the player and an NPC.
+    """Handle a dialogue event using the BG3 Handshake (3-phase intent pipeline).
 
-    If player_message is empty, generate an opening greeting for the NPC.
-    Otherwise, determine the player's intent (persuade / intimidate / inquire)
-    and generate the NPC's response in character.
-    Always returns 3-4 follow-up dialogue choices.
+    Phase 1 — classify intent and whether a dice roll is needed.
+    Phase 2 — resolve mechanics if requires_roll == True.
+    Phase 3 — synthesize final narrative from classification + optional roll result.
     """
     client = LLMClient()
 
-    # 1. Load session state
+    # ---- Load session state ---------------------------------------------------
     session_data = fetch_session(session_id=req.session_id)
     if not session_data or "player_state" not in session_data:
         raise HTTPException(404, f"No session found for '{req.session_id}'")
@@ -215,73 +218,88 @@ async def event_dialogue(req: DialogueRequest):
     player = _load_player(session_data["player_state"])
     world = _load_world(session_data["world_state"])
 
-    recent_messages = fetch_messages(req.session_id, limit=8)
-
-    # 2. Build NPC persona from active NPCs or generate on the fly
+    # ---- NPC persona (unchanged helper) ----------------------------------------
     npc_persona = "a mysterious traveler"
     for npc_name in world.active_npcs:
         if npc_name.lower() == req.npc_name.lower():
             npc_persona = f"{npc_name} (an NPC currently present in the area)"
             break
 
-    context_block = {
-        "player_name": player.name,
-        "player_faction": player.faction,
-        "player_motivation": player.motivation,
-        "location": world.current_location,
-        "turn": world.turn_count,
-    }
-
-    # 3. Generate NPC dialogue
-    dialogue_context = (
-        f"Player: {player.name}, Faction: {player.faction}, Motivation: {player.motivation}\n"
+    # ---- Phase 1: classify intent ----------------------------------------------
+    world_context_for_llm = (
         f"Location: {world.current_location}, Turn: {world.turn_count}\n"
-        f"You are playing the role of: {npc_persona}\n\n"
+        f"Player: {player.name} ({player.faction}, motivation: {player.motivation})\n"
+        f"NPC: {req.npc_name}"
     )
 
     if not req.player_message:
-        # NPC initiates — generate greeting
-        dialogue_context += "You are initiating this conversation. Generate an opening line."
-        system_prompt = client._load_system_prompt("prompts/turn_scene.md")
+        # NPC initiates — skip handshake, use old flow.
+        dialogue_context = (
+            f"Player: {player.name}, Faction: {player.faction}, Motivation: {player.motivation}\n"
+            f"Location: {world.current_location}, Turn: {world.turn_count}\n"
+            f"You are playing the role of: {npc_persona}\n\n"
+            "You are initiating this conversation. Generate an opening line."
+        )
         npc_response = client.generate_flavor_text(
             context=dialogue_context,
             instruction=f"Speak your opening line to {player.name}. Stay in character.",
         )
+        intent_classification = IntentClassification(
+            intent_type="DIALOGUE",
+            requires_roll=False,
+            skill_required=None,
+            action_summary=f"{req.npc_name} initiates dialogue.",
+        )
     else:
-        # Player responds — determine intent and generate NPC reply
-        dialogue_context += (
-            f"Previous conversation history:\n"
+        classification = client.classify_intent(req.player_message, world_context_for_llm)
+        # Persist the classification for logging/traceability.
+        intent_classification = classification
+
+    # ---- Phase 2: resolve mechanics (only if required) --------------------------
+    roll_metadata: dict | None = None
+
+    if intent_classification.requires_roll and req.player_message:
+        dc = 15  # simulated target DC for events
+        action_type_map = {
+            "Persuasion": "social",
+            "Intimidation": "social",
+            "Deception": "social",
+            "Insight": "exploration",
+            "Investigation": "exploration",
+            "Thievery": "stealth",
+        }
+        action_type = action_type_map.get(intent_classification.skill_required, "social")
+        skill_to_stat = {
+            "Persuasion": ("charisma", player.stats.charisma),
+            "Intimidation": ("charisma", player.stats.charisma),
+            "Deception": ("charisma", player.stats.charisma),
+            "Insight": ("wisdom", player.stats.wisdom),
+            "Investigation": ("intelligence", player.stats.intelligence),
+            "Thievery": ("dexterity", player.stats.dexterity),
+        }
+        _, stat_value = skill_to_stat.get(intent_classification.skill_required, ("charisma", 10))
+
+        # Proficiency scales with turn count per CLAUDE.md rules.
+        proficiency = 2 + world.turn_count // 5
+
+        roll_metadata = resolve_action(
+            action_type=action_type,
+            stat_name=None,
+            stat_value=stat_value,
+            advantage="none",
+            proficiency=proficiency,
+            world_context=f"{world.current_location} DC={dc}",
         )
-        for msg in recent_messages[-6:]:
-            role = "Player" if msg["role"] == "user" else ("DM/NPC" if msg["role"] == "system" else msg["role"])
-            dialogue_context += f"  <{role}>: {msg['content']}\n"
+        roll_metadata["target_dc"] = dc  # override engine default with our simulated DC
 
-        dialogue_context += f"\nYour turn to reply as {req.npc_name}.\n"
-        dialogue_context += f"Player said: {req.player_message!r}\n"
+    # ---- Phase 3: synthesize narrative ------------------------------------------
+    npc_response = client.generate_synthesis(
+        classification=intent_classification,
+        roll_metadata=roll_metadata,
+        world_context=world_context_for_llm,
+    )
 
-        # Try intent classification via LLM structured output
-        intent = "general"  # default fallback
-        try:
-            intent_prompt = (
-                f"Analyze the following player utterance and classify its intent.\n\n"
-                f"{dialogue_context}\n\n"
-                f"Reply with ONLY one word: persuade, intimidate, inquire, threaten, or general."
-            )
-            intent_text = client.generate_flavor_text(context=intent_prompt, instruction="Single word.")
-            intent = intent_text.strip().lower().split()[0] if intent_text.strip() else "general"
-        except Exception:
-            pass  # default to generic response
-
-        dialogue_system = client._load_system_prompt("prompts/turn_scene.md")
-        npc_response = client.generate_flavor_text(
-            context=dialogue_context,
-            instruction=(
-                f"Reply as {req.npc_name}. The player's tone was '{intent}'. "
-                f"Respond naturally in character."
-            ),
-        )
-
-    # 4. Generate dialogue choices for the player's next reply
+    # ---- Generate dialogue choices (unchanged) ----------------------------------
     try:
         choice_ctx = {
             "player_name": player.name,
@@ -305,7 +323,7 @@ async def event_dialogue(req: DialogueRequest):
             schema=ChoicesResponse,
         ).choices
     except Exception as exc:
-        client.logger.warning("dialogue choices generation failed: %s", exc) if hasattr(client, 'logger') else None
+        log.warning("dialogue choices generation failed: %s", exc)  # pyright: ignore[reportUndefinedVariable]
         choices = [
             f"Tell me more about yourself",
             f"What do you know about {world.current_location}?",
@@ -313,9 +331,10 @@ async def event_dialogue(req: DialogueRequest):
             "Leave quietly",
         ]
 
-    # 5. Persist conversation turn
-    append_message(req.session_id, "system", f"[Dialogue with {req.npc_name} — NPC]\n{npc_response}")
-    append_message(req.session_id, "user", req.player_message if req.player_message else f"[Initiated dialogue with {req.npc_name}]")
+    # ---- Persist and return -----------------------------------------------------
+    append_message(req.session_id, "system", f"[Dialogue with {req.npc_name}]\n{npc_response}")
+    if req.player_message:
+        append_message(req.session_id, "user", req.player_message)
     update_session(
         session_id=req.session_id,
         player_state=player,
@@ -333,10 +352,10 @@ async def event_dialogue(req: DialogueRequest):
 
 @app.post("/event/interact", response_model=InteractResponse)
 async def event_interact(req: InteractRequest):
-    """Generate flavor text for a player interacting with an object in the world."""
+    """Handle object interaction using the BG3 Handshake (3-phase intent pipeline)."""
     client = LLMClient()
 
-    # 1. Load session state
+    # ---- Load session state ---------------------------------------------------
     session_data = fetch_session(session_id=req.session_id)
     if not session_data or "player_state" not in session_data:
         raise HTTPException(404, f"No session found for '{req.session_id}'")
@@ -344,25 +363,60 @@ async def event_interact(req: InteractRequest):
     player = _load_player(session_data["player_state"])
     world = _load_world(session_data["world_state"])
 
-    # 2. Generate interaction flavor text
-    context = (
-        f"Location: {world.current_location}\n"
-        f"Turn: {world.turn_count}\n"
-        f"Player inventory: {', '.join(player.inventory[:5])}{'...' if len(player.inventory) > 5 else ''}\n"
-        f"The player interacts with the object: '{req.target_object}'.\n"
-        f"Describe what they see, feel, or discover. Keep it atmospheric and concise."
+    # ---- Phase 1: classify intent ----------------------------------------------
+    world_context_for_llm = (
+        f"Location: {world.current_location}, Turn: {world.turn_count}\n"
+        f"Object: '{req.target_object}'\n"
+        f"Inventory: {', '.join(player.inventory[:5])}{'...' if len(player.inventory) > 5 else ''}"
     )
 
-    try:
-        narrative = client.generate_flavor_text(
-            context=context,
-            instruction="Describe the interaction result vividly.",
-        )
-    except Exception as exc:
-        client.logger.warning("interact flavor failed: %s", exc) if hasattr(client, 'logger') else None
-        narrative = f"You examine '{req.target_object}'. Nothing happens — or does it?"
+    classification = client.classify_intent(
+        player_input=f"Interact with object: {req.target_object}",
+        world_context=world_context_for_llm,
+    )
+    intent_classification = classification
 
-    # 3. Persist
+    # ---- Phase 2: resolve mechanics (only if required) --------------------------
+    roll_metadata: dict | None = None
+
+    if intent_classification.requires_roll:
+        action_type_map = {
+            "Investigation": "exploration",
+            "Perception": "exploration",
+            "Arcana": "exploration",
+            "Nature": "exploration",
+            "History": "exploration",
+        }
+        action_type = action_type_map.get(intent_classification.skill_required, "exploration")
+
+        skill_to_stat = {
+            "Investigation": ("intelligence", player.stats.intelligence),
+            "Perception": ("wisdom", player.stats.wisdom),
+            "Arcana": ("intelligence", player.stats.intelligence),
+            "Nature": ("intelligence", player.stats.intelligence),
+            "History": ("intelligence", player.stats.intelligence),
+        }
+        _, stat_value = skill_to_stat.get(intent_classification.skill_required, ("intelligence", 10))
+
+        proficiency = 2 + world.turn_count // 5
+        roll_metadata = resolve_action(
+            action_type=action_type,
+            stat_name=None,
+            stat_value=stat_value,
+            advantage="none",
+            proficiency=proficiency,
+            world_context=f"{world.current_location} DC=12",
+        )
+        roll_metadata["target_dc"] = 12
+
+    # ---- Phase 3: synthesize narrative ------------------------------------------
+    narrative = client.generate_synthesis(
+        classification=intent_classification,
+        roll_metadata=roll_metadata,
+        world_context=world_context_for_llm,
+    )
+
+    # ---- Persist and return -----------------------------------------------------
     append_message(req.session_id, "system", f"[Interacted with {req.target_object}]\n{narrative}")
     update_session(
         session_id=req.session_id,

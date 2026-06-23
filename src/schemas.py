@@ -82,3 +82,27 @@ class CombatResolvedResponse(BaseModel):
     session_id: str
     narrative_summary: str = Field(description="Post-combat atmospheric summary.")
     updated_state: dict[str, Any] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# BG3 Handshake — Phase 1 intent classification
+# ---------------------------------------------------------------------------
+
+class IntentClassification(BaseModel):
+    """Phase-1 parser output: tells the server whether to roll dice."""
+    intent_type: str = Field(
+        description="Action category: DIALOGUE, INTERACT, ATTACK, or other named type.",
+    )
+    requires_roll: bool = Field(
+        description=(
+            "True ONLY if the action involves risk, hidden information, or opposed NPC "
+            "resistance. Mundane conversation and obvious observations must be False."
+        ),
+    )
+    skill_required: str | None = Field(
+        default=None,
+        description="Skill name (e.g. 'Persuasion', 'Investigation'). None when requires_roll is False.",
+    )
+    action_summary: str = Field(
+        description="One-sentence summary of what the player is attempting.",
+    )

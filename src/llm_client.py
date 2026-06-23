@@ -16,7 +16,7 @@ from typing import Any, TypeVar
 import ollama
 from pydantic import BaseModel, Field, model_validator
 
-from src.schemas import ChoicesResponse
+from src.schemas import ChoicesResponse, IntentClassification
 
 log = logging.getLogger(__name__)
 
@@ -257,6 +257,96 @@ class LLMClient:
         except Exception as exc:
             log.warning("intent classification failed: %s", exc)
             return "general"
+
+    def classify_intent(self, player_input: str, world_context: str) -> IntentClassification:
+        """Phase 1 of the BG3 Handshake — classify intent and whether a dice roll is needed.
+
+        Uses low-temperature deterministic output via Pydantic validation.
+        Mundane actions (conversation, obvious observations) should set requires_roll=False.
+        """
+        system_prompt = (
+            "You are a game engine parser, not a roleplayer. Classify the player's action strictly.\n\n"
+            "RULES:\n"
+            "- requires_roll MUST be False for: mundane conversation, greeting, thanking,\n"
+            "  looking at obvious things, examining surfaces, recalling lore with no hidden risk.\n"
+            "- requires_roll MUST be True only for: risky persuasion, intimidation checks,\n"
+            "  stealth approaches, investigating concealed details, combat actions, or anything\n"
+            "  where the outcome could fail based on hidden information or NPC opposition.\n"
+            "- skill_required should match the relevant skill (e.g. Persuasion, Investigation)\n"
+            "  OR be null when requires_roll is False.\n"
+            "- intent_type: use uppercase labels like DIALOGUE, INTERACT, ATTACK, or other\n"
+            "  short category names.\n"
+            "- Keep action_summary to one brief sentence.\n"
+        )
+        user_prompt = (
+            f"World context: {world_context}\n\n"
+            f"Player action: {player_input}\n\n"
+            "Output valid JSON matching the IntentClassification schema."
+        )
+
+        try:
+            return self.generate_structured(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                schema=IntentClassification,
+            )
+        except Exception as exc:
+            log.warning("intent classification failed: %s", exc)
+            # Safe fallback — mundane, no roll.
+            return IntentClassification(
+                intent_type="DIALOGUE",
+                requires_roll=False,
+                skill_required=None,
+                action_summary=player_input[:80],
+            )
+
+    def generate_synthesis(
+        self,
+        classification: IntentClassification,
+        roll_metadata: dict | None,
+        world_context: str,
+    ) -> str:
+        """Phase 3 of the BG3 Handshake — generate final flavor text.
+
+        If roll_metadata is present, narrate the exact mechanical outcome.
+        If roll_metadata is None, narrate the mundane action smoothly.
+        """
+        if roll_metadata is None:
+            # Mundane action — no dice involved.
+            context = (
+                f"Action type: {classification.intent_type}\n"
+                f"Skill: {classification.skill_required or 'N/A'}\n"
+                f"{classification.action_summary}\n\n"
+                "This was a mundane action with no risk. Describe the result naturally — "
+                "the player succeeds at what they intended, but narrate it as an ordinary "
+                "in-world moment (not triumphant, not disastrous). Keep it 2-4 sentences."
+            )
+        else:
+            # Dice were rolled — must reflect the actual outcome.
+            level = roll_metadata.get("outcome_level", "success")
+            success_label = "succeed" if roll_metadata.get("success") else "fail"
+            context = (
+                f"Action type: {classification.intent_type}\n"
+                f"Skill: {classification.skill_required or 'N/A'}\n"
+                f"{classification.action_summary}\n\n"
+                f"Dice result: raw roll={roll_metadata.get('dice_roll')}, "
+                f"modifier={roll_metadata.get('modifier')}, "
+                f"final score={roll_metadata.get('final_score')}, DC={roll_metadata.get('target_dc')}.\n"
+                f"Outcome level: {level} (player {success_label}).\n\n"
+                "You MUST narrate this exact outcome. If it was a critical success, make it vividly dramatic. "
+                "If partial or success, acknowledge the effort and the result. "
+                "If failure (including crit_fresh is special — celebrate it), narrate the setback gracefully: "
+                "describe the struggle, the near-miss, or the awkward silence. Never contradict the dice."
+            )
+
+        try:
+            return self.generate_flavor_text(context=context, instruction="Produce the final narrative.")
+        except Exception as exc:
+            log.warning("synthesis generation failed: %s", exc)
+            if roll_metadata is None:
+                return classification.action_summary + "."
+            success_word = "You succeed." if roll_metadata.get("success") else "You fail."
+            return f"{success_word} ({classification.action_summary})"
 
     def generate_dialogue_choices(self, player_name: str, npc_name: str, location: str, last_npc_line: str) -> list[str]:
         """Generate 3-4 conversational follow-up choices for the player."""
