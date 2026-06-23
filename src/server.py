@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from src.state import StateManager, Player, PlayerStats, WorldState
+from src.state import Player, PlayerStats, WorldState
 from src.database import (
     create_session,
     update_session,
@@ -36,6 +35,7 @@ from src.schemas import (
     CombatResolvedResponse,
 )
 from src.llm_client import LLMClient
+from src.schemas import ChoicesResponse
 
 # ---------------------------------------------------------------------------
 # FastAPI application & legacy I/O schemas (keep /game/start for bootstrap)
@@ -81,8 +81,21 @@ class DeleteRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _dc_asdict(obj):
-    """Convert a dataclass to dict for API response (avoids leaking internal fields like _bonus_cache)."""
-    return dataclasses.asdict(obj)
+    """Convert a dataclass to dict, stripping `_`-prefixed (internal) keys."""
+    d = dataclasses.asdict(obj)
+    return _strip_private(d)
+
+def _strip_private(d: dict) -> dict:
+    """Recursively remove keys starting with '_' from a dict tree."""
+    out: dict[str, Any] = {}
+    for k, v in d.items():
+        if k.startswith("_"):
+            continue
+        if isinstance(v, dict):
+            out[k] = _strip_private(v)
+        else:
+            out[k] = v
+    return out
 
 
 def _load_player(pj) -> Player:

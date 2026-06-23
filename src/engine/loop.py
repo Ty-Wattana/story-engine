@@ -1,7 +1,6 @@
 """Game loop — main turn cycle, action resolution, and outcome rendering."""
 
 import sys
-from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -14,21 +13,11 @@ from src.schemas import CharacterProfile
 from src.llm_client import LLMClient
 from src.lore import LoreParser, create_validator
 from src.action_engine import resolve_action
+from src._utils import load_prompt as _load_prompt
 
 from src.ui.status import show_status
 from src.ui.output import display_outcome, show_dm_choices
 from src.narrative import generate_scene_description, StoryMemory, StoryEvent
-
-# ---------------------------------------------------------------------------
-# Prompt loading helper — reads from prompts/ at repo root
-# ---------------------------------------------------------------------------
-
-_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
-
-
-def _load_prompt(name: str) -> str:
-    path = _PROMPTS_DIR / name
-    return path.read_text(encoding="utf-8").strip() if path.exists() else ""
 
 console = Console()
 

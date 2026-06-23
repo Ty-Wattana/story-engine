@@ -10,20 +10,10 @@ from rich.panel import Panel
 from rich.table import Table
 from rich import box
 
+from src._utils import load_prompt as _load_prompt
 from src.llm_client import LLMClient
 
 from .parser import LoreParser, LoreDatabase, LoreFact, LoreConstraint, LoreConflict
-
-# ---------------------------------------------------------------------------
-# Prompt loading helper — reads from prompts/ at repo root
-# ---------------------------------------------------------------------------
-
-_PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
-
-
-def _load_prompt(name: str) -> str:
-    path = _PROMPTS_DIR / name
-    return path.read_text(encoding="utf-8").strip() if path.exists() else ""
 
 
 class LLMValidationError:
