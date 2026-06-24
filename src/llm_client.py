@@ -51,6 +51,10 @@ class LLMClient:
     def intro_prompt(self) -> str:
         return self._load_system_prompt("prompts/intro_scene.md")
 
+    @property
+    def intent_classification_prompt(self) -> str:
+        return self._load_system_prompt("prompts/intent_classification.md")
+
     # ------------------------------------------------------------------
     # Structured generation (Pydantic-validated JSON)
     # ------------------------------------------------------------------
@@ -264,20 +268,7 @@ class LLMClient:
         Uses low-temperature deterministic output via Pydantic validation.
         Mundane actions (conversation, obvious observations) should set requires_roll=False.
         """
-        system_prompt = (
-            "You are a game engine parser, not a roleplayer. Classify the player's action strictly.\n\n"
-            "RULES:\n"
-            "- requires_roll MUST be False for: mundane conversation, greeting, thanking,\n"
-            "  looking at obvious things, examining surfaces, recalling lore with no hidden risk.\n"
-            "- requires_roll MUST be True only for: risky persuasion, intimidation checks,\n"
-            "  stealth approaches, investigating concealed details, combat actions, or anything\n"
-            "  where the outcome could fail based on hidden information or NPC opposition.\n"
-            "- skill_required should match the relevant skill (e.g. Persuasion, Investigation)\n"
-            "  OR be null when requires_roll is False.\n"
-            "- intent_type: use uppercase labels like DIALOGUE, INTERACT, ATTACK, or other\n"
-            "  short category names.\n"
-            "- Keep action_summary to one brief sentence.\n"
-        )
+        system_prompt = self.intent_classification_prompt
         user_prompt = (
             f"World context: {world_context}\n\n"
             f"Player action: {player_input}\n\n"
