@@ -59,6 +59,18 @@ class DialogueResponse(BaseModel):
         default_factory=dict,
         description="Sanitized player + world state snapshot for the client.",
     )
+    roll_metadata: RollResult | None = Field(
+        default=None,
+        description="Dice roll mechanics for Godot to display in the BG3-style HUD.",
+    )
+
+
+class RollResult(BaseModel):
+    """Mechanical roll result — sent to Godot for dice-roll UI."""
+    skill_used: str = Field(description="Skill checked (e.g. 'Persuasion', 'Investigation').")
+    target_dc: int = Field(description="Difficulty class for the check.")
+    roll_total: int = Field(description="Final roll total (d20 + modifiers).")
+    is_success: bool = Field(description="Whether the roll met or exceeded the DC.")
 
 
 class InteractRequest(BaseModel):
@@ -70,6 +82,10 @@ class InteractResponse(BaseModel):
     session_id: str
     narrative_description: str = Field(description="Flavor text describing the interaction result.")
     updated_state: dict[str, Any] = Field(default_factory=dict)
+    roll_metadata: RollResult | None = Field(
+        default=None,
+        description="Dice roll mechanics for Godot to display in the BG3-style HUD.",
+    )
 
 
 class CombatResolvedRequest(BaseModel):

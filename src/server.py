@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from src.state import Player, PlayerStats, WorldState, QuestNode
+from src.state import Player, PlayerStats, WorldState, QuestNode, StateManager
 from src.database import (
     create_session,
     update_session,
@@ -33,6 +33,7 @@ from src.schemas import (
     InteractResponse,
     CombatResolvedRequest,
     CombatResolvedResponse,
+    RollResult,
 )
 from src.llm_client import LLMClient
 from src.schemas import ChoicesResponse, IntentClassification
@@ -157,6 +158,23 @@ def _sanitized_state(player: Player, world: WorldState) -> dict[str, Any]:
     }
 
 
+def _game_snapshot(player: Player, world: WorldState) -> dict[str, Any]:
+    """Godot-ready snapshot via StateManager.snapshot()."""
+    # ponytail: StateManager constructor is minimal here — name/faction/motivation/goal/inventory/reputation + stats + location/turn_count/quests
+    sm = StateManager(
+        player=Player(
+            name=player.name, faction=player.faction, motivation=player.motivation,
+            goal=player.goal, inventory=list(player.inventory), reputation=dict(player.reputation),
+            stats=PlayerStats(**{s: getattr(player.stats, s) for s in ["strength","dexterity","intelligence","wisdom","constitution","charisma"]}),
+        ),
+        world=WorldState(
+            current_location=world.current_location, active_npcs=list(world.active_npcs),
+            turn_count=world.turn_count, quests={k: QuestNode(**v) for k, v in world.quests.items()},
+        ),
+    )
+    return sm.snapshot()
+
+
 # ---------------------------------------------------------------------------
 # Endpoints: Bootstrap
 # ---------------------------------------------------------------------------
@@ -275,6 +293,7 @@ async def event_dialogue(req: DialogueRequest):
 
     # ---- Phase 2: resolve mechanics (only if required) --------------------------
     roll_metadata: dict | None = None
+    roll_result: RollResult | None = None
 
     if intent_classification.requires_roll and req.player_message:
         dc = 15  # simulated target DC for events
@@ -309,6 +328,14 @@ async def event_dialogue(req: DialogueRequest):
             world_context=f"{world.current_location} DC={dc}",
         )
         roll_metadata["target_dc"] = dc  # override engine default with our simulated DC
+
+        # Wire roll data into BG3-style handshake for Godot.
+        roll_result = RollResult(
+            skill_used=intent_classification.skill_required,
+            target_dc=roll_metadata["target_dc"],
+            roll_total=roll_metadata["final_score"],
+            is_success=roll_metadata["success"],
+        )
 
     # ---- Phase 3: synthesize narrative ------------------------------------------
     npc_response = client.generate_synthesis(
@@ -364,7 +391,8 @@ async def event_dialogue(req: DialogueRequest):
         session_id=req.session_id,
         npc_response=npc_response,
         dialogue_choices=choices,
-        updated_state=_sanitized_state(player, world),
+        updated_state=_game_snapshot(player, world),
+        roll_metadata=roll_result,
     )
 
 
@@ -402,6 +430,7 @@ async def event_interact(req: InteractRequest):
 
     # ---- Phase 2: resolve mechanics (only if required) --------------------------
     roll_metadata: dict | None = None
+    roll_result: RollResult | None = None
 
     if intent_classification.requires_roll:
         action_type_map = {
@@ -433,6 +462,14 @@ async def event_interact(req: InteractRequest):
         )
         roll_metadata["target_dc"] = 12
 
+        # Wire roll data into BG3-style handshake for Godot.
+        roll_result = RollResult(
+            skill_used=intent_classification.skill_required,
+            target_dc=roll_metadata["target_dc"],
+            roll_total=roll_metadata["final_score"],
+            is_success=roll_metadata["success"],
+        )
+
     # ---- Phase 3: synthesize narrative ------------------------------------------
     narrative = client.generate_synthesis(
         classification=intent_classification,
@@ -452,7 +489,8 @@ async def event_interact(req: InteractRequest):
     return InteractResponse(
         session_id=req.session_id,
         narrative_description=narrative,
-        updated_state=_sanitized_state(player, world),
+        updated_state=_game_snapshot(player, world),
+        roll_metadata=roll_result,
     )
 
 
