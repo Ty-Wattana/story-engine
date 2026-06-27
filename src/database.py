@@ -306,20 +306,45 @@ def delete_session_by_slot(slot_name: str) -> bool:
 def _to_json(obj: Any) -> str:
     """Convert state objects to deterministic JSON string.
 
-    Handles Pydantic v2 BaseModel (.model_dump()), dataclasses (@dataclasses.asdict), and plain dicts.
+    Handles Pydantic v2 BaseModel (.model_dump()), dataclasses (@dataclasses.asdict),
+    and plain dicts.  Also recurses into dict values to convert any embedded Pydantic
+    models (e.g. QuestNode instances inside WorldState.quests).
     """
     if isinstance(obj, dict):
         return json.dumps(_strip_internal(obj))
     # Pydantic v2
     dump_method = getattr(obj, "model_dump", None)
     if dump_method:
-        return json.dumps(_strip_internal(dump_method()))
+        return json.dumps(_strip_internal(dump_method(mode="json")))
     # Python dataclasses
     asdict = getattr(obj, "__dataclass_fields__", None)
     if asdict is not None:
         import dataclasses
-        return json.dumps(_strip_internal(dataclasses.asdict(obj)))
+        d = _strip_internal(dataclasses.asdict(obj))
+        # Recurse once more — nested Pydantic models (e.g. QuestNode inside
+        # WorldState.quests dict) survive asdict and need converting.
+        return json.dumps(_jsonify_embedded_models(d))
     raise TypeError(f"Cannot serialise type {type(obj).__name__}")
+
+
+def _jsonify_embedded_models(d: Any) -> Any:
+    """Convert embedded Pydantic models in a dict tree so json.dumps can handle them."""
+    if isinstance(d, dict):
+        out: dict[str, Any] = {}
+        for k, v in d.items():
+            if k.startswith("_"):
+                continue
+            dm = getattr(v, "model_dump", None)
+            if dm and callable(dm):
+                out[k] = _jsonify_embedded_models(v.model_dump(mode="json"))
+            elif isinstance(v, dict):
+                out[k] = _jsonify_embedded_models(v)
+            else:
+                out[k] = v
+        return out
+    if isinstance(d, list):
+        return [_jsonify_embedded_models(item) for item in d]
+    return d
 
 
 def _from_json(text: str) -> dict[str, Any]:

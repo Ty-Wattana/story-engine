@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from src.state import Player, PlayerStats, WorldState
+from src.state import Player, PlayerStats, WorldState, QuestNode
 from src.database import (
     create_session,
     update_session,
@@ -37,6 +37,7 @@ from src.schemas import (
 from src.llm_client import LLMClient
 from src.schemas import ChoicesResponse, IntentClassification
 from src.action_engine import resolve_action
+from src.narrative import NarrativeDirector
 import logging
 
 log = logging.getLogger(__name__)
@@ -127,6 +128,13 @@ def _load_player(pj) -> Player:
     )
 
 
+def _load_quest_nodes(qd: dict[str, dict]) -> dict[str, QuestNode]:
+    """Reconstruct QuestNode objects from deserialized JSON dicts."""
+    if not qd:
+        return {}
+    return {k: QuestNode(**v) for k, v in qd.items()}
+
+
 def _load_world(wj) -> WorldState:
     """Reconstruct a WorldState from JSON text or dict."""
     if isinstance(wj, str):
@@ -137,6 +145,7 @@ def _load_world(wj) -> WorldState:
         current_location=wdata.get("current_location", "The Void"),
         active_npcs=wdata.get("active_npcs", []),
         turn_count=wdata.get("turn_count", 0),
+        quests=_load_quest_nodes(wdata.get("quests", {})),
     )
 
 
@@ -172,6 +181,9 @@ async def start_game(req: StartRequest):
         stats=PlayerStats(),
     )
     world = WorldState(current_location="The Void")
+
+    # ---- Update quest state (bootstrap — may not trigger yet) ------------------
+    NarrativeDirector.update_quests(world, player, world.current_location)
 
     intro_system = client._load_system_prompt("prompts/intro_scene.md")
     narrative = client.generate_flavor_text(
@@ -225,12 +237,18 @@ async def event_dialogue(req: DialogueRequest):
             npc_persona = f"{npc_name} (an NPC currently present in the area)"
             break
 
+    # ---- Update quest state ----------------------------------------------------
+    NarrativeDirector.update_quests(world, player, world.current_location)
+
     # ---- Phase 1: classify intent ----------------------------------------------
+    quest_ctx = NarrativeDirector.format_quest_context(world)
     world_context_for_llm = (
         f"Location: {world.current_location}, Turn: {world.turn_count}\n"
         f"Player: {player.name} ({player.faction}, motivation: {player.motivation})\n"
         f"NPC: {req.npc_name}"
     )
+    if quest_ctx:
+        world_context_for_llm += "\n" + quest_ctx
 
     if not req.player_message:
         # NPC initiates — skip handshake, use old flow.
@@ -363,12 +381,18 @@ async def event_interact(req: InteractRequest):
     player = _load_player(session_data["player_state"])
     world = _load_world(session_data["world_state"])
 
+    # ---- Update quest state ----------------------------------------------------
+    NarrativeDirector.update_quests(world, player, world.current_location)
+    quest_ctx_interact = NarrativeDirector.format_quest_context(world)
+
     # ---- Phase 1: classify intent ----------------------------------------------
     world_context_for_llm = (
         f"Location: {world.current_location}, Turn: {world.turn_count}\n"
         f"Object: '{req.target_object}'\n"
         f"Inventory: {', '.join(player.inventory[:5])}{'...' if len(player.inventory) > 5 else ''}"
     )
+    if quest_ctx_interact:
+        world_context_for_llm += "\n" + quest_ctx_interact
 
     classification = client.classify_intent(
         player_input=f"Interact with object: {req.target_object}",

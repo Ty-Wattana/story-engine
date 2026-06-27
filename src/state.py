@@ -1,5 +1,29 @@
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Dict, List, Any
+
+from pydantic import BaseModel
+
+
+class QuestStatus(str, Enum):
+    """Lifecycle of a long-term plot hook."""
+    HIDDEN = "hidden"         # not yet discovered
+    ACTIVE = "active"         # player is working on it
+    COMPLETED = "completed"   # objective fulfilled
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class QuestNode(BaseModel):
+    """A single discoverable quest in the master pool."""
+
+    quest_id: str
+    title: str
+    description: str
+    current_objective: str
+    status: QuestStatus = QuestStatus.HIDDEN
+    flags: dict[str, Any] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +132,7 @@ class WorldState:
     current_location: str = "The Void"
     active_npcs: List[str] = field(default_factory=list)
     turn_count: int = 0
+    quests: Dict[str, QuestNode] = field(default_factory=dict)
 
     def advance_turn(self):
         self.turn_count += 1

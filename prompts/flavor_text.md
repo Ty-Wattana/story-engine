@@ -22,3 +22,8 @@ If you receive mechanical [Outcome] data regarding an NPC interaction, use it:
 - *thinks* I should make the guard sound angry... "Get out!"
 - Here is the description: The tavern is loud and smells of ale.
 - The goblin looks at you and says hello, asking what you want. (Rule broken: Show, don't tell. Use actual dialogue quotes).
+
+## ACTIVE PLOT HOOKS & LORE
+If the context block includes `[ACTIVE PLOT HOOKS]`, the player is currently on these quests.
+- NPCs should organically drop hints, rumors, or warnings related to these active objectives if the player asks for information.
+- Do NOT make the NPC sound like a robot reading a quest log. Weave the objective into natural, in-character gossip or complaints.
